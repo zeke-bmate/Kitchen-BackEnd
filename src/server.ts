@@ -3,6 +3,8 @@ import cors from "cors";
 import { prisma } from "./prisma.js";
 import multer from "multer";
 import { parse } from "csv-parse/sync"
+import jwt from "jsonwebtoken";
+import bcrypt from "bcryptjs";
 
 const app = express();
 
@@ -10,21 +12,71 @@ const upload = multer({
     storage: multer.memoryStorage(),
 })
 
+// Mock database user
+const mockUser = {
+  id: "123",
+  username: "john_doe",
+  passwordHash: "" // Will be set below
+};
+
+// Seed mock user password (password is "secure123")
+mockUser.passwordHash = bcrypt.hashSync("secure123", 10);
+
+// --- MIDDLEWARE: Protect Routes ---
+const verifyToken = (req, res, next) => {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1]; // Expects "Bearer <token>"
+
+  if (!token) {
+    return res.status(401).json({ message: "Access denied. No token provided." });
+  }
+
+  try {
+    const verified = jwt.verify(token, process.env.JWT_SECRET);
+    req.user = verified; // Adds user data (id) to the request object
+    next();
+  } catch (error) {
+    res.status(403).json({ message: "Invalid or expired token." });
+  }
+};
+
 app.use(cors());
 app.use(express.json());
+
+app.post('/api/login', (req, res) => {
+  const { username, password } = req.body;
+
+  if (username !== mockUser.username) {
+    return res.status(400).json({ message: "Invalid credentials." });
+  }
+
+  const isPasswordValid = bcrypt.compareSync(password, mockUser.passwordHash);
+  if (!isPasswordValid) {
+    return res.status(400).json({ message: "Invalid credentials." });
+  }
+
+  // Generate JWT (Expires in 1 hour)
+  const token = jwt.sign(
+    { userId: mockUser.id }, 
+    process.env.JWT_SECRET, 
+    { expiresIn: '1h' }
+  );
+
+  res.json({ token });
+});
 
 app.get("/api/health", (req, res) => {
     res.json({ status: "ok" });
 });
 
-app.get("/api/suppliers", async (req, res) => {
+app.get("/api/suppliers", verifyToken, async (req, res) => {
     const suppliers = await prisma.supplier.findMany({
         orderBy: { createdAt: "desc"}
     });
     res.json(suppliers);
 });
 
-app.post("/api/suppliers", async (req, res) => {
+app.post("/api/suppliers", verifyToken, async (req, res) => {
     const name = req.body.name;
     if (typeof name !== 'string') {
         res.status(422).send("Name of supplier is not of type string");
@@ -52,7 +104,7 @@ app.post("/api/suppliers", async (req, res) => {
     res.status(201).json(supplier);
 });
 
-app.get("/api/purchases", async (req, res) => {
+app.get("/api/purchases", verifyToken, async (req, res) => {
     const purchases = await prisma.purchase.findMany({
         include: { 
             supplier: true,
@@ -63,7 +115,7 @@ app.get("/api/purchases", async (req, res) => {
     res.json(purchases);
 });
 
-app.post("/api/purchases", async (req, res) => {
+app.post("/api/purchases", verifyToken, async (req, res) => {
     const items = req.body.items;
     const date = req.body.date;
     const supplierId = req.body.supplierId;
@@ -179,14 +231,14 @@ app.post("/api/purchases", async (req, res) => {
     res.status(201).json(result);
 });
 
-app.get("/api/raw-ingredients", async (req, res) => {
+app.get("/api/raw-ingredients", verifyToken, async (req, res) => {
     const ingredients = await prisma.rawIngredient.findMany({
         orderBy: { name: "asc"},
     });
     res.json(ingredients);
 });
 
-app.post("/api/raw-ingredients", async (req, res) => {
+app.post("/api/raw-ingredients", verifyToken, async (req, res) => {
     const name = req.body.name;
     const currentWeightKg = req.body.currentWeightKg;
 
@@ -226,7 +278,7 @@ app.post("/api/raw-ingredients", async (req, res) => {
     return res.status(201).json(ingredient);
 });
 
-app.patch("/api/raw-ingredients/:id", async (req,res) => {
+app.patch("/api/raw-ingredients/:id", verifyToken, async (req,res) => {
     const currentWeightKg = req.body.currentWeightKg;
 
     if (!isNonNegativeNumber(currentWeightKg)) {
@@ -261,7 +313,7 @@ app.patch("/api/raw-ingredients/:id", async (req,res) => {
     res.status(200).json(updatedIngredient);
 });
 
-app.get("/api/recipes", async (req, res) => {
+app.get("/api/recipes", verifyToken, async (req, res) => {
     const recipes = await prisma.recipe.findMany({
         include: { 
             ingredients: { 
@@ -273,7 +325,7 @@ app.get("/api/recipes", async (req, res) => {
     res.json(recipes);
 });
 
-app.post("/api/recipes", async (req, res) => {
+app.post("/api/recipes", verifyToken, async (req, res) => {
     const name = req.body.name;
 
     if (!isNonEmptyString(name)) {
@@ -382,7 +434,7 @@ app.post("/api/recipes", async (req, res) => {
     res.status(201).json(recipe);
 });
 
-app.get("/api/production-batches", async (req, res) => {
+app.get("/api/production-batches", verifyToken, async (req, res) => {
     const productionBatches = await prisma.productionBatch.findMany({
         include : { 
             recipe : {
@@ -400,7 +452,7 @@ app.get("/api/production-batches", async (req, res) => {
     res.json(productionBatches);
 });
 
-app.post("/api/production-batches", async (req, res) => {
+app.post("/api/production-batches", verifyToken, async (req, res) => {
     const recipeId = req.body.recipeId;
 
     if (!isNonEmptyString(recipeId)) {
@@ -491,7 +543,7 @@ app.post("/api/production-batches", async (req, res) => {
     res.status(201).json(result);
 });
 
-app.get("/api/finished-inventory", async (req, res) => {
+app.get("/api/finished-inventory", verifyToken, async (req, res) => {
     const finishedInventory = await prisma.finishedInventory.findMany({
         include : { recipe: true },
         orderBy: { 
@@ -563,7 +615,7 @@ app.post("/api/sales", async (req, res) => {
     res.status(201).json(result);
 });
 
-app.get("/api/sales", async (req, res) => {
+app.get("/api/sales", verifyToken, async (req, res) => {
     const sales = await prisma.sale.findMany({
         include : { recipe: true },
         orderBy : { createdAt: "desc"}
@@ -571,7 +623,7 @@ app.get("/api/sales", async (req, res) => {
     res.json(sales);
 });
 
-app.get("/api/recipes/:id/cost", async (req, res) => {
+app.get("/api/recipes/:id/cost", verifyToken, async (req, res) => {
     const recipeId = req.params.id;
 
     if (!isNonEmptyString(recipeId)) {
@@ -639,7 +691,7 @@ app.get("/api/recipes/:id/cost", async (req, res) => {
     res.status(200).json(response);
 });
 
-app.post("/api/sales-import/preview", upload.single("file"), async (req, res) => {
+app.post("/api/sales-import/preview", verifyToken, upload.single("file"), async (req, res) => {
     if (!req.file) {
         res.status(422).json({
             error: "CSV file is required"
@@ -687,7 +739,7 @@ app.post("/api/sales-import/preview", upload.single("file"), async (req, res) =>
     res.json(preview);
 });
 
-app.post("/api/sales-import/mappings", async (req, res) => {
+app.post("/api/sales-import/mappings", verifyToken, async (req, res) => {
     const posProductName = req.body.posProductName;
     const recipeId = req.body.recipeId;
 
@@ -723,7 +775,7 @@ app.post("/api/sales-import/mappings", async (req, res) => {
     res.status(201).json(mapping);
 });
 
-app.post("/api/sales-import/confirm", async (req, res) => {
+app.post("/api/sales-import/confirm", verifyToken, async (req, res) => {
     const imports = req.body;
 
     if (!Array.isArray(imports)) {
@@ -848,7 +900,7 @@ app.post("/api/sales-import/confirm", async (req, res) => {
     res.status(201).json(summary);
 });
 
-app.get("/api/dashboard", async (req, res) => {
+app.get("/api/dashboard", verifyToken, async (req, res) => {
     const availableServings = await prisma.finishedInventory.aggregate({
         _sum: { quantityAvailable: true }
     });
