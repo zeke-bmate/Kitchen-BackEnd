@@ -1,0 +1,113 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Get a free hosted Postgres database in seconds: `npx create-db`
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+model Supplier {
+  id        String     @id @default(cuid())
+  name      String
+  purchases Purchase[]
+  createdAt DateTime   @default(now())
+}
+
+model Purchase {
+  id         String         @id @default(cuid())
+  date       DateTime
+  totalPrice Float
+  supplierId String
+  supplier   Supplier       @relation(fields: [supplierId], references: [id])
+  createdAt  DateTime       @default(now())
+  items      PurchaseItem[]
+}
+
+model PurchaseItem {
+  id         String   @id @default(cuid())
+  purchaseId String
+  purchase   Purchase @relation(fields: [purchaseId], references: [id])
+  itemName   String
+  orderUnits String
+  weightKg   Float
+  pricePerKg Float
+  totalPrice Float
+}
+
+model RawIngredient {
+  id                String             @id @default(cuid())
+  name              String             @unique
+  currentWeightKg   Float
+  createdAt         DateTime           @default(now())
+  recipeIngredients RecipeIngredient[]
+}
+
+model Recipe {
+  id                 String              @id @default(cuid())
+  name               String              @unique
+  servings           Float
+  createdAt          DateTime            @default(now())
+  ingredients        RecipeIngredient[]
+  productionBatches  ProductionBatch[]
+  finishedInventory  FinishedInventory?
+  sales              Sale[]
+  salesImports       SalesImport[]
+  posProductMappings POSProductMapping[]
+}
+
+model RecipeIngredient {
+  id              String        @id @default(cuid())
+  recipeId        String
+  rawIngredientId String
+  weightKg        Float
+  recipe          Recipe        @relation(fields: [recipeId], references: [id])
+  rawIngredient   RawIngredient @relation(fields: [rawIngredientId], references: [id])
+
+  @@unique([recipeId, rawIngredientId])
+}
+
+model ProductionBatch {
+  id               String   @id @default(cuid())
+  recipeId         String
+  quantityProduced Float
+  createdAt        DateTime @default(now())
+  recipe           Recipe   @relation(fields: [recipeId], references: [id])
+}
+
+model FinishedInventory {
+  id                String   @id @default(cuid())
+  recipeId          String   @unique
+  quantityAvailable Float
+  updatedAt         DateTime @updatedAt
+  recipe            Recipe   @relation(fields: [recipeId], references: [id])
+}
+
+model Sale {
+  id           String   @id @default(cuid())
+  recipeId     String
+  quantitySold Float
+  createdAt    DateTime @default(now())
+  recipe       Recipe   @relation(fields: [recipeId], references: [id])
+}
+
+model POSProductMapping {
+  id             String   @id @default(cuid())
+  posProductName String   @unique
+  recipeId       String
+  recipe         Recipe   @relation(fields: [recipeId], references: [id])
+  createdAt      DateTime @default(now())
+}
+
+model SalesImport {
+  id             String   @id @default(cuid())
+  posProductName String
+  quantitySold   Float
+  recipeId       String
+  recipe         Recipe   @relation(fields: [recipeId], references: [id])
+  importedAt     DateTime @default(now())
+}
