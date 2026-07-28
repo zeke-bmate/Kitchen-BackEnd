@@ -5,3 +5,4 @@ dev.db
 /generated/prisma
 dev.db-journal
 prisma/migrations
+src/test.ts

@@ -12,15 +12,8 @@ const upload = multer({
     storage: multer.memoryStorage(),
 })
 
-// Mock database user
-const mockUser = {
-  id: "123",
-  username: "john_doe",
-  passwordHash: "" // Will be set below
-};
-
 // Seed mock user password (password is "secure123")
-mockUser.passwordHash = bcrypt.hashSync("secure123", 10);
+//mockUser.passwordHash = bcrypt.hashSync("secure123", 10);
 
 // --- MIDDLEWARE: Protect Routes ---
 const verifyToken = (req, res, next) => {
@@ -43,26 +36,25 @@ const verifyToken = (req, res, next) => {
 app.use(cors());
 app.use(express.json());
 
-app.post('/api/login', (req, res) => {
+app.post('/api/login', async (req, res) => {
   const { username, password } = req.body;
+  //const isPasswordValid = bcrypt.compareSync(password, mockUser.passwordHash);
+  const uid = await prisma.user.findFirst({
+    where: { username: "super", password: password }
+  });
 
-  if (username !== mockUser.username) {
+  if(!uid){
     return res.status(400).json({ message: "Invalid credentials." });
+  } else {
+    // Generate JWT (Expires in 1 hour)
+    const token = jwt.sign(
+        { userId: uid.id }, 
+        process.env.JWT_SECRET, 
+        { expiresIn: '15min' }
+    );
+    res.json({ token });
   }
-
-  const isPasswordValid = bcrypt.compareSync(password, mockUser.passwordHash);
-  if (!isPasswordValid) {
-    return res.status(400).json({ message: "Invalid credentials." });
-  }
-
-  // Generate JWT (Expires in 1 hour)
-  const token = jwt.sign(
-    { userId: mockUser.id }, 
-    process.env.JWT_SECRET, 
-    { expiresIn: '1h' }
-  );
-
-  res.json({ token });
+  
 });
 
 app.get("/api/health", (req, res) => {
