@@ -1,8 +1,3 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
-// Get a free hosted Postgres database in seconds: `npx create-db`
-
 generator client {
   provider = "prisma-client-js"
 }
@@ -14,8 +9,8 @@ datasource db {
 model Supplier {
   id        String     @id @default(cuid())
   name      String
-  purchases Purchase[]
   createdAt DateTime   @default(now())
+  purchases Purchase[]
 }
 
 model Purchase {
@@ -23,20 +18,20 @@ model Purchase {
   date       DateTime
   totalPrice Float
   supplierId String
-  supplier   Supplier       @relation(fields: [supplierId], references: [id])
   createdAt  DateTime       @default(now())
+  supplier   Supplier       @relation(fields: [supplierId], references: [id])
   items      PurchaseItem[]
 }
 
 model PurchaseItem {
   id         String   @id @default(cuid())
   purchaseId String
-  purchase   Purchase @relation(fields: [purchaseId], references: [id])
   itemName   String
   orderUnits String
   weightKg   Float
   pricePerKg Float
   totalPrice Float
+  purchase   Purchase @relation(fields: [purchaseId], references: [id])
 }
 
 model RawIngredient {
@@ -52,12 +47,12 @@ model Recipe {
   name               String              @unique
   servings           Float
   createdAt          DateTime            @default(now())
-  ingredients        RecipeIngredient[]
-  productionBatches  ProductionBatch[]
   finishedInventory  FinishedInventory?
+  posProductMappings POSProductMapping[]
+  productionBatches  ProductionBatch[]
+  ingredients        RecipeIngredient[]
   sales              Sale[]
   salesImports       SalesImport[]
-  posProductMappings POSProductMapping[]
 }
 
 model RecipeIngredient {
@@ -65,8 +60,8 @@ model RecipeIngredient {
   recipeId        String
   rawIngredientId String
   weightKg        Float
-  recipe          Recipe        @relation(fields: [recipeId], references: [id])
   rawIngredient   RawIngredient @relation(fields: [rawIngredientId], references: [id])
+  recipe          Recipe        @relation(fields: [recipeId], references: [id])
 
   @@unique([recipeId, rawIngredientId])
 }
@@ -99,8 +94,8 @@ model POSProductMapping {
   id             String   @id @default(cuid())
   posProductName String   @unique
   recipeId       String
-  recipe         Recipe   @relation(fields: [recipeId], references: [id])
   createdAt      DateTime @default(now())
+  recipe         Recipe   @relation(fields: [recipeId], references: [id])
 }
 
 model SalesImport {
@@ -108,6 +103,21 @@ model SalesImport {
   posProductName String
   quantitySold   Float
   recipeId       String
-  recipe         Recipe   @relation(fields: [recipeId], references: [id])
   importedAt     DateTime @default(now())
+  recipe         Recipe   @relation(fields: [recipeId], references: [id])
+}
+
+model User {
+  id        Int      @id @default(autoincrement())
+  username  String   @unique
+  password  String
+  name      String
+  role      Int
+  createdAt DateTime @default(now())
+}
+
+model Role {
+  id        Int      @id @default(autoincrement())
+  name      String   @unique
+  createdAt DateTime @default(now())
 }

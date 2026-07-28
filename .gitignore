@@ -3,3 +3,5 @@ node_modules
 .env
 dev.db
 /generated/prisma
+dev.db-journal
+prisma/migrations
