@@ -5,6 +5,7 @@ import multer from "multer";
 import { parse } from "csv-parse/sync"
 import jwt from "jsonwebtoken";
 import bcrypt from "bcryptjs";
+import { OrderStatus } from "@prisma/client";
 
 const app = express();
 
@@ -446,6 +447,7 @@ app.get("/api/production-batches", verifyToken, async (req, res) => {
 
 app.post("/api/production-batches", verifyToken, async (req, res) => {
     const recipeId = req.body.recipeId;
+    const orderId = req.body.orderId;
 
     if (!isNonEmptyString(recipeId)) {
         res.status(422).json({
@@ -453,6 +455,12 @@ app.post("/api/production-batches", verifyToken, async (req, res) => {
         });
         return;
     }
+
+    if (orderId !== undefined && !isNonEmptyString(orderId)) {
+        return res.status(422).json({
+            error: "Order ID must be a non-empty string."
+    });
+}
 
     const quantityProduced = req.body.quantityProduced;
 
@@ -479,6 +487,26 @@ app.post("/api/production-batches", verifyToken, async (req, res) => {
         return;
     }
 
+    if (orderId) {
+        const order = await prisma.order.findUnique({
+            where : { id: orderId }
+        });
+
+        if (!order) {
+            res.status(404).json({
+                error: "Order not found"
+            });
+            return;
+        }
+    
+        if (order.recipeId !== recipeId) {
+            res.status(422).json({
+                error: "Recipe ID does not match order."
+            });
+            return;
+        }
+    }
+    
     const multiplier = quantityProduced;
     
     for (const ingredient of recipe.ingredients) {
@@ -496,8 +524,10 @@ app.post("/api/production-batches", verifyToken, async (req, res) => {
             data: { 
                 recipeId: recipeId,
                 quantityProduced: quantityProduced,
+                orderId: orderId,
                 },
             include: { 
+                order: true,
                 recipe: {
                     include: {
                         ingredients: {
@@ -959,6 +989,196 @@ app.get("/api/dashboard", verifyToken, async (req, res) => {
         lowStockItems,
         recentImports,
     });
+});
+
+app.get("/api/orders", verifyToken, async (req,res) => {
+    try {
+        const orders = await prisma.order.findMany({
+        orderBy: { createdAt: "desc"},
+        include: {
+            recipe: true,
+        },
+    });
+    return res.json(orders);
+    } catch (error) {
+        console.error(error);
+
+        return res.status(500).json({
+            error: "Failed to retrieve orders.",
+        });
+    }
+});
+
+app.get("/api/orders/:id", verifyToken, async (req,res) => {
+    try {
+        const { id: orderId } = req.params;
+
+        if (!isNonEmptyString(orderId)) {
+            return res.status(422).json({
+                error: "Order ID must be a non-empty string.",
+            });
+        }
+
+        const existingOrder = await prisma.order.findUnique({
+            where: { id: orderId },
+            include: {
+                recipe: true,
+                statusLogs: {
+                    orderBy: {
+                        createdAt: "asc",
+                    },
+                },
+            },
+        });
+
+        if (!existingOrder) {
+            return res.status(404).json({
+                error: "Order not found.",
+            });
+        }
+
+        return res.json(existingOrder);
+    } catch (error) {
+        console.error(error);
+
+        return res.status(500).json({
+            error: "Failed to retrieve order."
+        });
+    }
+});
+
+app.post("/api/orders", verifyToken, async (req, res) => {
+    const { recipeId, quantity } = req.body;
+
+    if (!isNonEmptyString(recipeId)) {
+        return res.status(400).json({ error: "Recipe ID is required." });
+    }
+
+    if (!isPositiveNumber(quantity)) {
+        return res.status(400).json({ error: "Quantity must be a positive number." });
+    }
+
+    const recipe = await prisma.recipe.findUnique({
+        where: { id: recipeId },
+    });
+
+    if (!recipe) {
+        return res.status(404).json({ error: "Recipe not found."})
+    }
+
+    try {
+        const order = await prisma.$transaction(async (tx) => {
+
+        const createdOrder = await tx.order.create({
+            data: {
+                recipeId,
+                quantity,
+            },
+            include: {
+                recipe: true,
+            },
+        });
+
+        await tx.orderStatusLog.create({
+            data: {
+                orderId: createdOrder.id,
+                previousStatus: null,
+                newStatus: OrderStatus.CREATED,
+            },
+        });
+
+        return createdOrder;
+    });
+
+        return res.status(201).json(order);
+    } catch (error) {
+        console.error(error);
+        return res.status(500).json({
+            error: "Failed to create order."
+        })
+    }
+    
+});
+
+const nextStatus: Partial<Record<OrderStatus, OrderStatus>> = {
+        [OrderStatus.CREATED]: OrderStatus.PENDING,
+        [OrderStatus.PENDING]: OrderStatus.DONE,
+        [OrderStatus.DONE]: OrderStatus.DELIVERY,
+        [OrderStatus.DELIVERY]: OrderStatus.FINISHED,
+    };
+
+app.patch("/api/orders/:id/status", verifyToken, async (req,res) => {
+
+    const { id: orderId } = req.params;
+    const status = req.body.status;
+    
+    if (!isNonEmptyString(orderId)) {
+        return res.status(422).json({
+            error: "Order ID must be of type String and non-empty"
+        });
+    }
+
+    const existingOrder = await prisma.order.findUnique({
+        where: { id: orderId },
+    });
+
+    if (!existingOrder) {
+        return res.status(404).json({
+            error: "Order not found.",
+        });
+    }
+
+   if (!isNonEmptyString(status) ||
+       !Object.values(OrderStatus).includes(status as OrderStatus)) {
+        return res.status(422).json({
+            error: "Invalid order status.",
+        });
+   }
+
+   const newStatus = status as OrderStatus;
+
+   if (existingOrder.status === newStatus) {
+        return res.status(409).json({
+            error: `Order is already ${status}.`,
+        });
+   }
+
+   const expectedStatus = nextStatus[existingOrder.status];
+
+   if (newStatus !== expectedStatus) {
+       return res.status(409).json({
+           error: `Order cannot move from ${existingOrder.status} to ${newStatus}.`,
+           expectedStatus,
+       });
+   }
+
+   try {
+
+       const updatedOrder = await prisma.$transaction(async (tx) => {
+            const order = await tx.order.update({
+                where: { id: existingOrder.id },
+                data: { status: newStatus },
+            }); 
+
+            await tx.orderStatusLog.create({
+            data: {
+                orderId: order.id,
+                previousStatus: existingOrder.status,
+                newStatus: newStatus,
+            },
+        });
+
+        return order;
+       });
+
+       return res.status(200).json(updatedOrder);
+   } catch (error) {
+        console.error(error);
+
+        return res.status(500).json({
+            error: "Failed to update order status.",
+        });
+   }
 });
 
 function isNonEmptyString(value: unknown): boolean {
