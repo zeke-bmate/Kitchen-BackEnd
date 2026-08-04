@@ -1,12 +1,15 @@
 import { prisma } from "../src/prisma.js";
+import bcrypt from "bcryptjs";
 
 async function main() {
   
   await prisma.role.deleteMany()
   
   await prisma.$executeRawUnsafe(
-    `UPDATE sqlite_sequence SET seq = 0 WHERE name = 'Role ';`
+    `UPDATE sqlite_sequence SET seq = 0 WHERE name = 'Role';`
   )
+
+  const passwordHash = await bcrypt.hash("super123", 10);
 
   const roles = await prisma.role.createManyAndReturn({
     data: [
@@ -22,7 +25,7 @@ async function main() {
   await prisma.user.deleteMany()
 
   const users = await prisma.user.create({
-    data: { name: 'Admintrator', username: 'super', password: 'super123', role: roles[0].id }
+    data: { name: 'Administrator', username: 'super', passwordHash, roleId: roles[0].id }
   })
 }
 
