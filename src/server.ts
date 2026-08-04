@@ -37,25 +37,155 @@ const verifyToken = (req, res, next) => {
 app.use(cors());
 app.use(express.json());
 
-app.post('/api/login', async (req, res) => {
+app.post("/api/login", async (req, res) => {
   const { username, password } = req.body;
-  //const isPasswordValid = bcrypt.compareSync(password, mockUser.passwordHash);
-  const uid = await prisma.user.findFirst({
-    where: { username: "super", password: password }
+
+  const user = await prisma.user.findUnique({
+    where: { username },
   });
 
-  if(!uid){
-    return res.status(400).json({ message: "Invalid credentials." });
-  } else {
-    // Generate JWT (Expires in 1 hour)
-    const token = jwt.sign(
-        { userId: uid.id }, 
-        process.env.JWT_SECRET, 
-        { expiresIn: '15min' }
-    );
-    res.json({ token });
+  if (!user) {
+    return res.status(400).json({
+      message: "Invalid credentials.",
+    });
   }
-  
+
+  const passwordMatches = await bcrypt.compare(
+    password,
+    user.passwordHash,
+  );
+
+  if (!passwordMatches) {
+    return res.status(400).json({
+      message: "Invalid credentials.",
+    });
+  }
+
+  const token = jwt.sign(
+    { userId: user.id },
+    process.env.JWT_SECRET,
+    { expiresIn: "15min" },
+  );
+
+  return res.json({ token });
+});
+
+app.get("/api/users", verifyToken, async (req, res) => {
+    try {
+        const users = await prisma.user.findMany({
+            orderBy: { name: "asc" },
+            select: {
+                id: true,
+                name: true,
+                createdAt: true,
+                username: true,
+                role: {
+                    select: {
+                        id: true,
+                        name: true,
+                    },
+                },
+            },
+        });
+
+        return res.json(users);
+    } catch (error) {
+        console.error(error);
+
+        return res.status(500).json({
+            error: "Failed to retrieve users.",
+        });
+    }
+});
+
+app.post("/api/users", verifyToken, async (req, res) => {
+
+    try {
+        const { username, password, name, roleId } = req.body;
+
+        if (!isNonEmptyString(username)) {
+            return res.status(422).json({
+                error: "Username must be of type String and non-empty"
+            });
+        }
+        if (!isNonEmptyString(password)) {
+            return res.status(422).json({
+                error: "Password must be of type String and non-empty"
+            });
+        }
+        if (!isNonEmptyString(name)) {
+            return res.status(422).json({
+                error: "Name must be of type String and non-empty"
+            });
+        }
+        if (!isPositiveNumber(roleId)) {
+            return res.status(422).json({
+                error: "Role Id must be a positive number greater than zero"
+            });
+        }
+
+        const existingUser = await prisma.user.findUnique({
+            where: { username },
+        });
+
+        if (existingUser) {
+             return res.status(409).json({
+              error: "Username already exists.",
+            });
+        }
+
+        const role = await prisma.role.findUnique({
+            where: { id: roleId },
+        });
+
+        if (!role) {
+            return res.status(404).json({
+              error: "Role not found.",
+            });
+        }
+
+        const passwordHash = await bcrypt.hash(password, 10);
+
+        const createdUser = await prisma.user.create({
+            data: { name, passwordHash, username, roleId },
+            select: {
+                id: true,
+                username: true,
+                name: true,
+                createdAt: true,
+                role: {
+                    select: {
+                        id: true,
+                        name: true,
+                    },
+                },
+            }
+        });
+
+        return res.status(201).json(createdUser);
+    } catch (error) {
+        console.error(error);
+
+        return res.status(500).json({
+            error: "Failed to create user.",
+        });
+    }
+}); 
+
+app.get("/api/roles", verifyToken, async (req, res) => {
+    try {
+        const roles = await prisma.role.findMany({
+            orderBy: { id: "asc"},
+        });
+
+        return res.json(roles);
+    } catch (error) {
+        console.error(error);
+
+        res.status(500).json({
+            error: "Failed to retrieve roles.",
+        });
+    }
 });
 
 app.get("/api/health", (req, res) => {
