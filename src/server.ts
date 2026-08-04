@@ -430,6 +430,11 @@ app.post("/api/recipes", verifyToken, async (req, res) => {
 app.get("/api/production-batches", verifyToken, async (req, res) => {
     const productionBatches = await prisma.productionBatch.findMany({
         include : { 
+            order : {
+                include : {
+                    recipe: true,
+                },
+            },
             recipe : {
                 include : {
                     ingredients : {
@@ -1158,6 +1163,9 @@ app.patch("/api/orders/:id/status", verifyToken, async (req,res) => {
             const order = await tx.order.update({
                 where: { id: existingOrder.id },
                 data: { status: newStatus },
+                include: {
+                    recipe: true,
+                },
             }); 
 
             await tx.orderStatusLog.create({
