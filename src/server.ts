@@ -13,6 +13,11 @@ const upload = multer({
     storage: multer.memoryStorage(),
 })
 
+type JwtPayload = {
+  userId: number;
+  role: string;
+};
+
 // Seed mock user password (password is "secure123")
 //mockUser.passwordHash = bcrypt.hashSync("secure123", 10);
 
@@ -26,12 +31,35 @@ const verifyToken = (req, res, next) => {
   }
 
   try {
-    const verified = jwt.verify(token, process.env.JWT_SECRET);
+    const verified = jwt.verify(
+      token,
+      process.env.JWT_SECRET!,
+    ) as JwtPayload;
     req.user = verified; // Adds user data (id) to the request object
     next();
   } catch (error) {
     res.status(403).json({ message: "Invalid or expired token." });
   }
+};
+
+const requireRole = (...allowedRoles: string[]) => {
+  return (req, res, next) => {
+    const userRole = req.user?.role;
+
+    if (!userRole) {
+      return res.status(403).json({
+        message: "Access denied. User role not found.",
+      });
+    }
+
+    if (!allowedRoles.includes(userRole)) {
+      return res.status(403).json({
+        message: "Access denied. Insufficient permissions.",
+      });
+    }
+
+    next();
+  };
 };
 
 app.use(cors());
@@ -42,6 +70,9 @@ app.post("/api/login", async (req, res) => {
 
   const user = await prisma.user.findUnique({
     where: { username },
+    include: {
+        role: true,
+    },
   });
 
   if (!user) {
@@ -62,7 +93,9 @@ app.post("/api/login", async (req, res) => {
   }
 
   const token = jwt.sign(
-    { userId: user.id },
+    { userId: user.id,
+      role: user.role.name,
+     },
     process.env.JWT_SECRET,
     { expiresIn: "15min" },
   );
@@ -70,7 +103,7 @@ app.post("/api/login", async (req, res) => {
   return res.json({ token });
 });
 
-app.get("/api/users", verifyToken, async (req, res) => {
+app.get("/api/users", verifyToken, requireRole("Admin"), async (req, res) => {
     try {
         const users = await prisma.user.findMany({
             orderBy: { name: "asc" },
@@ -98,7 +131,7 @@ app.get("/api/users", verifyToken, async (req, res) => {
     }
 });
 
-app.post("/api/users", verifyToken, async (req, res) => {
+app.post("/api/users", verifyToken, requireRole("Admin"), async (req, res) => {
 
     try {
         const { username, password, name, roleId } = req.body;
@@ -172,7 +205,7 @@ app.post("/api/users", verifyToken, async (req, res) => {
     }
 }); 
 
-app.get("/api/roles", verifyToken, async (req, res) => {
+app.get("/api/roles", verifyToken, requireRole("Admin"),  async (req, res) => {
     try {
         const roles = await prisma.role.findMany({
             orderBy: { id: "asc"},
@@ -192,14 +225,14 @@ app.get("/api/health", (req, res) => {
     res.json({ status: "ok" });
 });
 
-app.get("/api/suppliers", verifyToken, async (req, res) => {
+app.get("/api/suppliers", verifyToken, requireRole("Admin", "Echo"), async (req, res) => {
     const suppliers = await prisma.supplier.findMany({
         orderBy: { createdAt: "desc"}
     });
     res.json(suppliers);
 });
 
-app.post("/api/suppliers", verifyToken, async (req, res) => {
+app.post("/api/suppliers", verifyToken, requireRole("Admin", "Echo"), async (req, res) => {
     const name = req.body.name;
     if (typeof name !== 'string') {
         res.status(422).send("Name of supplier is not of type string");
@@ -227,7 +260,7 @@ app.post("/api/suppliers", verifyToken, async (req, res) => {
     res.status(201).json(supplier);
 });
 
-app.get("/api/purchases", verifyToken, async (req, res) => {
+app.get("/api/purchases", verifyToken, requireRole("Admin", "Echo"), async (req, res) => {
     const purchases = await prisma.purchase.findMany({
         include: { 
             supplier: true,
@@ -238,7 +271,7 @@ app.get("/api/purchases", verifyToken, async (req, res) => {
     res.json(purchases);
 });
 
-app.post("/api/purchases", verifyToken, async (req, res) => {
+app.post("/api/purchases", verifyToken, requireRole("Admin", "Echo"), async (req, res) => {
     const items = req.body.items;
     const date = req.body.date;
     const supplierId = req.body.supplierId;
@@ -354,14 +387,14 @@ app.post("/api/purchases", verifyToken, async (req, res) => {
     res.status(201).json(result);
 });
 
-app.get("/api/raw-ingredients", verifyToken, async (req, res) => {
+app.get("/api/raw-ingredients", verifyToken, requireRole("Admin", "Echo"), async (req, res) => {
     const ingredients = await prisma.rawIngredient.findMany({
         orderBy: { name: "asc"},
     });
     res.json(ingredients);
 });
 
-app.post("/api/raw-ingredients", verifyToken, async (req, res) => {
+app.post("/api/raw-ingredients", verifyToken, requireRole("Admin", "Echo"), async (req, res) => {
     const name = req.body.name;
     const currentWeightKg = req.body.currentWeightKg;
 
@@ -401,7 +434,7 @@ app.post("/api/raw-ingredients", verifyToken, async (req, res) => {
     return res.status(201).json(ingredient);
 });
 
-app.patch("/api/raw-ingredients/:id", verifyToken, async (req,res) => {
+app.patch("/api/raw-ingredients/:id", verifyToken, requireRole("Admin", "Echo"), async (req,res) => {
     const currentWeightKg = req.body.currentWeightKg;
 
     if (!isNonNegativeNumber(currentWeightKg)) {
@@ -436,7 +469,7 @@ app.patch("/api/raw-ingredients/:id", verifyToken, async (req,res) => {
     res.status(200).json(updatedIngredient);
 });
 
-app.get("/api/recipes", verifyToken, async (req, res) => {
+app.get("/api/recipes", verifyToken, requireRole("Admin", "DeePlace", "Echo"), async (req, res) => {
     const recipes = await prisma.recipe.findMany({
         include: { 
             ingredients: { 
@@ -448,7 +481,7 @@ app.get("/api/recipes", verifyToken, async (req, res) => {
     res.json(recipes);
 });
 
-app.post("/api/recipes", verifyToken, async (req, res) => {
+app.post("/api/recipes", verifyToken, requireRole("Admin", "Echo"), async (req, res) => {
     const name = req.body.name;
 
     if (!isNonEmptyString(name)) {
@@ -557,7 +590,7 @@ app.post("/api/recipes", verifyToken, async (req, res) => {
     res.status(201).json(recipe);
 });
 
-app.get("/api/production-batches", verifyToken, async (req, res) => {
+app.get("/api/production-batches", verifyToken, requireRole("Admin", "Echo"), async (req, res) => {
     const productionBatches = await prisma.productionBatch.findMany({
         include : { 
             order : {
@@ -580,7 +613,7 @@ app.get("/api/production-batches", verifyToken, async (req, res) => {
     res.json(productionBatches);
 });
 
-app.post("/api/production-batches", verifyToken, async (req, res) => {
+app.post("/api/production-batches", verifyToken, requireRole("Admin", "Echo"), async (req, res) => {
     const recipeId = req.body.recipeId;
     const orderId = req.body.orderId;
 
@@ -700,7 +733,7 @@ app.post("/api/production-batches", verifyToken, async (req, res) => {
     res.status(201).json(result);
 });
 
-app.get("/api/finished-inventory", verifyToken, async (req, res) => {
+app.get("/api/finished-inventory", verifyToken, requireRole("Admin", "DeePlace", "Echo"), async (req, res) => {
     const finishedInventory = await prisma.finishedInventory.findMany({
         include : { recipe: true },
         orderBy: { 
@@ -712,7 +745,7 @@ app.get("/api/finished-inventory", verifyToken, async (req, res) => {
     res.json(finishedInventory);
 });
 
-app.post("/api/sales", async (req, res) => {
+app.post("/api/sales", requireRole("Admin", "DeePlace"), async (req, res) => {
     const recipeId = req.body.recipeId;
 
     if (!isNonEmptyString(recipeId)) {
@@ -772,7 +805,7 @@ app.post("/api/sales", async (req, res) => {
     res.status(201).json(result);
 });
 
-app.get("/api/sales", verifyToken, async (req, res) => {
+app.get("/api/sales", requireRole("Admin", "DeePlace"), verifyToken, async (req, res) => {
     const sales = await prisma.sale.findMany({
         include : { recipe: true },
         orderBy : { createdAt: "desc"}
@@ -780,7 +813,7 @@ app.get("/api/sales", verifyToken, async (req, res) => {
     res.json(sales);
 });
 
-app.get("/api/recipes/:id/cost", verifyToken, async (req, res) => {
+app.get("/api/recipes/:id/cost", verifyToken, requireRole("Admin", "DeePlace", "Echo"), async (req, res) => {
     const recipeId = req.params.id;
 
     if (!isNonEmptyString(recipeId)) {
@@ -848,7 +881,7 @@ app.get("/api/recipes/:id/cost", verifyToken, async (req, res) => {
     res.status(200).json(response);
 });
 
-app.post("/api/sales-import/preview", verifyToken, upload.single("file"), async (req, res) => {
+app.post("/api/sales-import/preview", verifyToken, requireRole("Admin", "DeePlace"), upload.single("file"), async (req, res) => {
     if (!req.file) {
         res.status(422).json({
             error: "CSV file is required"
@@ -896,7 +929,7 @@ app.post("/api/sales-import/preview", verifyToken, upload.single("file"), async 
     res.json(preview);
 });
 
-app.post("/api/sales-import/mappings", verifyToken, async (req, res) => {
+app.post("/api/sales-import/mappings", verifyToken, requireRole("Admin", "DeePlace"), async (req, res) => {
     const posProductName = req.body.posProductName;
     const recipeId = req.body.recipeId;
 
@@ -932,7 +965,7 @@ app.post("/api/sales-import/mappings", verifyToken, async (req, res) => {
     res.status(201).json(mapping);
 });
 
-app.post("/api/sales-import/confirm", verifyToken, async (req, res) => {
+app.post("/api/sales-import/confirm", verifyToken, requireRole("Admin", "DeePlace"), async (req, res) => {
     const imports = req.body;
 
     if (!Array.isArray(imports)) {
@@ -1057,7 +1090,7 @@ app.post("/api/sales-import/confirm", verifyToken, async (req, res) => {
     res.status(201).json(summary);
 });
 
-app.get("/api/dashboard", verifyToken, async (req, res) => {
+app.get("/api/dashboard", verifyToken, requireRole("Admin", "DeePlace", "Echo"), async (req, res) => {
     const availableServings = await prisma.finishedInventory.aggregate({
         _sum: { quantityAvailable: true }
     });
@@ -1126,7 +1159,7 @@ app.get("/api/dashboard", verifyToken, async (req, res) => {
     });
 });
 
-app.get("/api/orders", verifyToken, async (req,res) => {
+app.get("/api/orders", verifyToken, requireRole("Admin", "DeePlace", "Echo"), async (req,res) => {
     try {
         const orders = await prisma.order.findMany({
         orderBy: { createdAt: "desc"},
@@ -1182,7 +1215,7 @@ app.get("/api/orders/:id", verifyToken, async (req,res) => {
     }
 });
 
-app.post("/api/orders", verifyToken, async (req, res) => {
+app.post("/api/orders", verifyToken, requireRole("Admin", "DeePlace", "Echo"), async (req, res) => {
     const { recipeId, quantity } = req.body;
 
     if (!isNonEmptyString(recipeId)) {
@@ -1242,7 +1275,7 @@ const nextStatus: Partial<Record<OrderStatus, OrderStatus>> = {
         [OrderStatus.DELIVERY]: OrderStatus.FINISHED,
     };
 
-app.patch("/api/orders/:id/status", verifyToken, async (req,res) => {
+app.patch("/api/orders/:id/status", verifyToken, requireRole("Admin", "DeePlace", "Echo"), async (req,res) => {
 
     const { id: orderId } = req.params;
     const status = req.body.status;
