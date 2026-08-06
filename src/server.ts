@@ -38,7 +38,7 @@ const verifyToken = (req, res, next) => {
     req.user = verified; // Adds user data (id) to the request object
     next();
   } catch (error) {
-    res.status(403).json({ message: "Invalid or expired token." });
+    res.status(401).json({ message: "Invalid or expired token." });
   }
 };
 
@@ -435,38 +435,66 @@ app.post("/api/raw-ingredients", verifyToken, requireRole("Admin", "Echo"), asyn
 });
 
 app.patch("/api/raw-ingredients/:id", verifyToken, requireRole("Admin", "Echo"), async (req,res) => {
-    const currentWeightKg = req.body.currentWeightKg;
 
-    if (!isNonNegativeNumber(currentWeightKg)) {
-        res.status(422).json({
-            error: "Weight must be a non-negative number"
+    try {
+        const currentWeightKg = req.body.currentWeightKg;
+
+        if (!isNonNegativeNumber(currentWeightKg)) {
+            return res.status(422).json({
+                error: "Weight must be a non-negative number"
+            });
+        }
+
+        const ingredientId = req.params.id;
+
+        const existingIngredient = await prisma.rawIngredient.findUnique({
+            where : { id : ingredientId }
         });
-        return;
-    }
 
-    const ingredientId = req.params.id;
+        if (!existingIngredient) {
+            return res.status(404).json({
+                error: "Ingredient not found"
+            });
+        }
 
-    const existingIngredient = await prisma.rawIngredient.findUnique({
-        where : { id : ingredientId }
-    });
+        const reason = req.body.reason;
 
-    if (!existingIngredient) {
-        res.status(404).json({
-            error: "Ingredient not found"
+        if (reason !== undefined && !isNonEmptyString(reason)) {
+          return res.status(422).json({
+            error: "Reason must be a non-empty string when provided.",
+          });
+        }
+
+        const updatedIngredient = await prisma.$transaction(async (tx) => {
+          const updated = await tx.rawIngredient.update({
+            where: {
+              id: ingredientId,
+            },
+            data: {
+              currentWeightKg,
+            },
+          });
+
+          await tx.inventoryAdjustment.create({
+            data: {
+              rawIngredientId: ingredientId,
+              previousWeightKg: existingIngredient.currentWeightKg,
+              newWeightKg: currentWeightKg,
+              reason: reason?.trim() || null,
+            },
+          });
+
+          return updated;
         });
-        return;
+
+        return res.status(200).json(updatedIngredient);
+    } catch (error) {
+        console.error(error);
+
+        return res.status(500).json({
+            error: "Failed to update ingredient.",
+        });
     }
-
-    const updatedIngredient = await prisma.rawIngredient.update({
-        data: {
-            currentWeightKg: currentWeightKg,
-        },
-        where: {
-            id: ingredientId,
-        },
-    });
-
-    res.status(200).json(updatedIngredient);
 });
 
 app.get("/api/recipes", verifyToken, requireRole("Admin", "DeePlace", "Echo"), async (req, res) => {
