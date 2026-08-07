@@ -2,7 +2,7 @@ import { prisma } from "../src/prisma.js";
 import bcrypt from "bcryptjs";
 
 async function main() {
-  
+  await prisma.user.deleteMany()
   await prisma.role.deleteMany()
   
   await prisma.$executeRawUnsafe(
@@ -21,8 +21,7 @@ async function main() {
   })
 
   //console.log(roles[0].id); 
-  
-  await prisma.user.deleteMany()
+
 
   const users = await prisma.user.create({
     data: { name: 'Administrator', username: 'super', passwordHash, roleId: roles[0].id }
