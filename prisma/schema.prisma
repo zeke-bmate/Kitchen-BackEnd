@@ -32,6 +32,8 @@ model PurchaseItem {
   pricePerKg Float
   totalPrice Float
   purchase   Purchase @relation(fields: [purchaseId], references: [id])
+  rawIngredientId String?
+  rawIngredient   RawIngredient? @relation(fields: [rawIngredientId], references: [id])
 }
 
 model RawIngredient {
@@ -40,6 +42,7 @@ model RawIngredient {
   currentWeightKg   Float
   createdAt         DateTime           @default(now())
   recipeIngredients RecipeIngredient[]
+  purchaseItems PurchaseItem[]
   inventoryAdjustments InventoryAdjustment[]
 }
 
