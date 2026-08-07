@@ -271,121 +271,232 @@ app.get("/api/purchases", verifyToken, requireRole("Admin", "Echo"), async (req,
     res.json(purchases);
 });
 
-app.post("/api/purchases", verifyToken, requireRole("Admin", "Echo"), async (req, res) => {
-    const items = req.body.items;
-    const date = req.body.date;
-    const supplierId = req.body.supplierId;
-    if (!Array.isArray(items) || items.length === 0) {
-        res.status(422).json({
-            error: "Items must be a non-empty array"
-        });
-        return;
-    }
-    if (!isValidDate(date)) {
-        res.status(422).json({
-            error: "Date must be of type String and valid"
-        });
-        return;
-    }
-    if (!isNonEmptyString(supplierId)) {
-        res.status(422).json({
-            error: "Supplier ID must be of type String and non-empty"
-        });
-        return;
-    }
+app.post(
+  "/api/purchases",
+  verifyToken,
+  requireRole("Admin", "Echo"),
+  async (req, res) => {
+    try {
+      const items = req.body.items;
+      const date = req.body.date;
+      const supplierId = req.body.supplierId;
 
-    const existingSupplierID = await prisma.supplier.findUnique({
+      if (!Array.isArray(items) || items.length === 0) {
+        return res.status(422).json({
+          error: "Items must be a non-empty array.",
+        });
+      }
+
+      if (!isValidDate(date)) {
+        return res.status(422).json({
+          error: "Date must be a valid string.",
+        });
+      }
+
+      if (!isNonEmptyString(supplierId)) {
+        return res.status(422).json({
+          error: "Supplier ID must be a non-empty string.",
+        });
+      }
+
+      const existingSupplier = await prisma.supplier.findUnique({
         where: { id: supplierId },
-    });
+      });
 
-    if (!existingSupplierID) {
-        res.status(422).json({
-            error: "Supplier does not exist"
+      if (!existingSupplier) {
+        return res.status(404).json({
+          error: "Supplier does not exist.",
         });
-        return;
-    }
-    const validatedItems: { itemName: any; orderUnits: any; weightKg: any; pricePerKg: any; totalPrice: number; }[] = []
-    let purchaseTotal = 0
-    for (const i of items) {
-        const itemName = i.itemName
-        const orderUnits = i.orderUnits
-        const weightKg = i.weightKg;
-        const pricePerKg = i.pricePerKg;
+      }
 
-        if (!isNonEmptyString(itemName)) {
-            res.status(422).json({
-                error: "Item Name must be of type String and non-empty"
-            });
-            return;
+      const validatedItems: {
+        orderUnits: string;
+        weightKg: number;
+        pricePerKg: number;
+        totalPrice: number;
+        rawIngredientId?: string;
+        newIngredientName?: string;
+      }[] = [];
+
+      let purchaseTotal = 0;
+
+      for (const item of items) {
+        const orderUnits = item.orderUnits;
+        const weightKg = item.weightKg;
+        const pricePerKg = item.pricePerKg;
+        const rawIngredientId = item.rawIngredientId;
+        const newIngredientName = item.newIngredientName;
+
+        const hasExistingIngredient =
+          isNonEmptyString(rawIngredientId);
+
+        const hasNewIngredient =
+          isNonEmptyString(newIngredientName);
+
+        if (hasExistingIngredient === hasNewIngredient) {
+          return res.status(422).json({
+            error:
+              "Each purchase item must select an existing ingredient or provide a new ingredient name.",
+          });
         }
 
         if (!isNonEmptyString(orderUnits)) {
-            res.status(422).json({
-                error: "Order Units must be of type String and non-empty"
-            });
-            return;
+          return res.status(422).json({
+            error: "Order Units must be a non-empty string.",
+          });
         }
 
         if (!isPositiveNumber(weightKg)) {
-            res.status(422).json({
-                error: "Weight must be a positive number greater than zero"
-            });
-            return;
+          return res.status(422).json({
+            error: "Weight must be greater than zero.",
+          });
         }
 
         if (!isPositiveNumber(pricePerKg)) {
-            res.status(422).json({
-                error: "Price per KG must be a positive number greater than zero"
-            });
-            return;
+          return res.status(422).json({
+            error: "Price per KG must be greater than zero.",
+          });
         }
 
         const totalPrice = weightKg * pricePerKg;
-        const trimmedName = normalizeIngredientName(itemName)
-        const trimmedOrderUnits = orderUnits.trim();
+
         validatedItems.push({
-            itemName: trimmedName,
-            orderUnits: trimmedOrderUnits,
-            weightKg: weightKg,
-            pricePerKg: pricePerKg,
-            totalPrice: totalPrice,
-        });
-        purchaseTotal += totalPrice
-    }
-
-    const result = await prisma.$transaction(async (tx) => {
-        const purchase = await tx.purchase.create({
-            data: { 
-                date: new Date(`${date}T12:00:00`),
-                supplierId: supplierId,
-                totalPrice: purchaseTotal,
-                items: {
-                    create: validatedItems
-                }},
-            include: { 
-                supplier: true,
-                items: true,
-            }
+          orderUnits: orderUnits.trim(),
+          weightKg,
+          pricePerKg,
+          totalPrice,
+          ...(hasExistingIngredient && {
+            rawIngredientId,
+          }),
+          ...(hasNewIngredient && {
+            newIngredientName:
+              normalizeIngredientName(newIngredientName),
+          }),
         });
 
-        for (const i of validatedItems) {
-            await tx.rawIngredient.upsert({
-                where: { name: i.itemName },
-                update: { currentWeightKg: {
-                    increment: i.weightKg
-                }},
-                create: { 
-                    name: i.itemName,
-                    currentWeightKg: i.weightKg,
-                }
+        purchaseTotal += totalPrice;
+      }
+
+      const result = await prisma.$transaction(async (tx) => {
+        const resolvedItems: {
+          itemName: string;
+          orderUnits: string;
+          weightKg: number;
+          pricePerKg: number;
+          totalPrice: number;
+          rawIngredientId: string;
+        }[] = [];
+
+        for (const item of validatedItems) {
+          let rawIngredient;
+
+          if (item.rawIngredientId) {
+            rawIngredient = await tx.rawIngredient.findUnique({
+              where: {
+                id: item.rawIngredientId,
+              },
             });
+
+            if (!rawIngredient) {
+              throw new Error("RAW_INGREDIENT_NOT_FOUND");
+            }
+
+            await tx.rawIngredient.update({
+              where: {
+                id: rawIngredient.id,
+              },
+              data: {
+                currentWeightKg: {
+                  increment: item.weightKg,
+                },
+              },
+            });
+          } else {
+            const normalizedName = item.newIngredientName!;
+
+            const existingIngredient =
+              await tx.rawIngredient.findUnique({
+                where: {
+                  name: normalizedName,
+                },
+              });
+
+            if (existingIngredient) {
+              throw new Error(
+                `DUPLICATE_INGREDIENT:${normalizedName}`,
+              );
+            }
+
+            rawIngredient = await tx.rawIngredient.create({
+              data: {
+                name: normalizedName,
+                currentWeightKg: item.weightKg,
+              },
+            });
+          }
+
+          resolvedItems.push({
+            itemName: rawIngredient.name,
+            orderUnits: item.orderUnits,
+            weightKg: item.weightKg,
+            pricePerKg: item.pricePerKg,
+            totalPrice: item.totalPrice,
+            rawIngredientId: rawIngredient.id,
+          });
         }
 
-        return purchase ;
-    });
+        const purchase = await tx.purchase.create({
+          data: {
+            date: new Date(`${date}T12:00:00`),
+            supplierId,
+            totalPrice: purchaseTotal,
+            items: {
+              create: resolvedItems,
+            },
+          },
+          include: {
+            supplier: true,
+            items: {
+              include: {
+                rawIngredient: true,
+              },
+            },
+          },
+        });
 
-    res.status(201).json(result);
-});
+        return purchase;
+      });
+
+      return res.status(201).json(result);
+    } catch (error) {
+      console.error(error);
+
+      if (
+        error instanceof Error &&
+        error.message === "RAW_INGREDIENT_NOT_FOUND"
+      ) {
+        return res.status(404).json({
+          error: "Raw ingredient not found.",
+        });
+      }
+
+      if (
+        error instanceof Error &&
+        error.message.startsWith("DUPLICATE_INGREDIENT:")
+      ) {
+        const ingredientName = error.message.split(":")[1];
+
+        return res.status(409).json({
+          error: `Ingredient "${ingredientName}" already exists. Select the existing ingredient instead.`,
+        });
+      }
+
+      return res.status(500).json({
+        error: "Failed to create purchase.",
+      });
+    }
+  },
+);
 
 app.get("/api/raw-ingredients", verifyToken, requireRole("Admin", "Echo"), async (req, res) => {
     const ingredients = await prisma.rawIngredient.findMany({
