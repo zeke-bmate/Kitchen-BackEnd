@@ -310,7 +310,7 @@ app.post(
       }
 
       const validatedItems: {
-        orderUnits: string;
+        orderUnits: string | null;
         weightKg: number;
         pricePerKg: number;
         totalPrice: number;
@@ -340,12 +340,6 @@ app.post(
           });
         }
 
-        if (!isNonEmptyString(orderUnits)) {
-          return res.status(422).json({
-            error: "Order Units must be a non-empty string.",
-          });
-        }
-
         if (!isPositiveNumber(weightKg)) {
           return res.status(422).json({
             error: "Weight must be greater than zero.",
@@ -361,7 +355,10 @@ app.post(
         const totalPrice = weightKg * pricePerKg;
 
         validatedItems.push({
-          orderUnits: orderUnits.trim(),
+          orderUnits:
+            typeof orderUnits === "string" && orderUnits.trim()
+              ? orderUnits.trim()
+              : null,
           weightKg,
           pricePerKg,
           totalPrice,
@@ -380,7 +377,7 @@ app.post(
       const result = await prisma.$transaction(async (tx) => {
         const resolvedItems: {
           itemName: string;
-          orderUnits: string;
+          orderUnits: string | null;
           weightKg: number;
           pricePerKg: number;
           totalPrice: number;

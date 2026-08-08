@@ -27,7 +27,7 @@ model PurchaseItem {
   id         String   @id @default(cuid())
   purchaseId String
   itemName   String
-  orderUnits String
+  orderUnits String?
   weightKg   Float
   pricePerKg Float
   totalPrice Float
