@@ -382,10 +382,14 @@ app.post(
           pricePerKg: number;
           totalPrice: number;
           rawIngredientId: string;
+          previousWeightKg: number;
+          newWeightKg: number;
         }[] = [];
 
         for (const item of validatedItems) {
           let rawIngredient;
+          let previousWeightKg: number;
+          let newWeightKg: number;
 
           if (item.rawIngredientId) {
             rawIngredient = await tx.rawIngredient.findUnique({
@@ -398,7 +402,9 @@ app.post(
               throw new Error("RAW_INGREDIENT_NOT_FOUND");
             }
 
-            await tx.rawIngredient.update({
+            previousWeightKg = rawIngredient.currentWeightKg;
+
+            const updatedIngredient = await tx.rawIngredient.update({
               where: {
                 id: rawIngredient.id,
               },
@@ -408,6 +414,8 @@ app.post(
                 },
               },
             });
+
+            newWeightKg = updatedIngredient.currentWeightKg;
           } else {
             const normalizedName = item.newIngredientName!;
 
@@ -424,12 +432,16 @@ app.post(
               );
             }
 
+            previousWeightKg = 0;
+
             rawIngredient = await tx.rawIngredient.create({
               data: {
                 name: normalizedName,
                 currentWeightKg: item.weightKg,
               },
             });
+
+            newWeightKg = rawIngredient.currentWeightKg;
           }
 
           resolvedItems.push({
@@ -439,6 +451,8 @@ app.post(
             pricePerKg: item.pricePerKg,
             totalPrice: item.totalPrice,
             rawIngredientId: rawIngredient.id,
+            previousWeightKg,
+            newWeightKg,
           });
         }
 
@@ -448,7 +462,14 @@ app.post(
             supplierId,
             totalPrice: purchaseTotal,
             items: {
-              create: resolvedItems,
+              create: resolvedItems.map((item) => ({
+                itemName: item.itemName,
+                orderUnits: item.orderUnits,
+                weightKg: item.weightKg,
+                pricePerKg: item.pricePerKg,
+                totalPrice: item.totalPrice,
+                rawIngredientId: item.rawIngredientId,
+              })),
             },
           },
           include: {
@@ -460,6 +481,19 @@ app.post(
             },
           },
         });
+
+        for (const item of resolvedItems) {
+          await tx.inventoryTransaction.create({
+            data: {
+              rawIngredientId: item.rawIngredientId,
+              type: "PURCHASE",
+              quantityChangeKg: item.weightKg,
+              previousWeightKg: item.previousWeightKg,
+              newWeightKg: item.newWeightKg,
+              purchaseId: purchase.id,
+            },
+          });
+        }
 
         return purchase;
       });
@@ -501,6 +535,61 @@ app.get("/api/raw-ingredients", verifyToken, requireRole("Admin", "Echo"), async
     });
     res.json(ingredients);
 });
+
+app.get(
+  "/api/raw-ingredients/:id/transactions",
+  verifyToken,
+  requireRole("Admin", "Echo"),
+  async (req, res) => {
+    try {
+      const ingredientId = req.params.id;
+
+      const ingredient = await prisma.rawIngredient.findUnique({
+        where: {
+          id: ingredientId,
+        },
+      });
+
+      if (!ingredient) {
+        return res.status(404).json({
+          error: "Ingredient not found.",
+        });
+      }
+
+      const transactions = await prisma.inventoryTransaction.findMany({
+          where: {
+            rawIngredientId: ingredientId,
+          },
+          include: {
+            purchase: {
+              include: {
+                supplier: true,
+              },
+            },
+            productionBatch: {
+              include: {
+                recipe: true,
+              },
+            },
+          },
+          orderBy: {
+            createdAt: "desc",
+          },
+        });
+
+      return res.status(200).json({
+        ingredient,
+        transactions,
+      });
+    } catch (error) {
+      console.error(error);
+
+      return res.status(500).json({
+        error: "Failed to load inventory transactions.",
+      });
+    }
+  },
+);
 
 app.post("/api/raw-ingredients", verifyToken, requireRole("Admin", "Echo"), async (req, res) => {
     const name = req.body.name;
@@ -586,6 +675,18 @@ app.patch("/api/raw-ingredients/:id", verifyToken, requireRole("Admin", "Echo"),
           await tx.inventoryAdjustment.create({
             data: {
               rawIngredientId: ingredientId,
+              previousWeightKg: existingIngredient.currentWeightKg,
+              newWeightKg: currentWeightKg,
+              reason: reason?.trim() || null,
+            },
+          });
+
+          await tx.inventoryTransaction.create({
+            data: {
+              rawIngredientId: ingredientId,
+              type: "ADJUSTMENT",
+              quantityChangeKg:
+                currentWeightKg - existingIngredient.currentWeightKg,
               previousWeightKg: existingIngredient.currentWeightKg,
               newWeightKg: currentWeightKg,
               reason: reason?.trim() || null,
@@ -844,11 +945,30 @@ app.post("/api/production-batches", verifyToken, requireRole("Admin", "Echo"), a
 
         for (const ingredient of recipe.ingredients) {
             const requiredKg = ingredient.weightKg * multiplier;
-            await tx.rawIngredient.update({
-                where: { id: ingredient.rawIngredientId },
-                data: { currentWeightKg: {
-                    decrement: requiredKg
-                }},
+
+            const previousWeightKg =
+                ingredient.rawIngredient.currentWeightKg;
+
+            const updatedIngredient = await tx.rawIngredient.update({
+                where: {
+                    id: ingredient.rawIngredientId
+                },
+                data: {
+                    currentWeightKg: {
+                        decrement: requiredKg
+                    }
+                },
+            });
+        
+            await tx.inventoryTransaction.create({
+                data: {
+                    rawIngredientId: ingredient.rawIngredientId,
+                    type: "PRODUCTION",
+                    quantityChangeKg: -requiredKg,
+                    previousWeightKg,
+                    newWeightKg: updatedIngredient.currentWeightKg,
+                    productionBatchId: production.id,
+                },
             });
         }
 
