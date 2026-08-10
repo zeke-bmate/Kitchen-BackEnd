@@ -21,6 +21,7 @@ model Purchase {
   createdAt  DateTime       @default(now())
   supplier   Supplier       @relation(fields: [supplierId], references: [id])
   items      PurchaseItem[]
+  inventoryTransactions InventoryTransaction[]
 }
 
 model PurchaseItem {
@@ -44,6 +45,7 @@ model RawIngredient {
   recipeIngredients RecipeIngredient[]
   purchaseItems PurchaseItem[]
   inventoryAdjustments InventoryAdjustment[]
+  inventoryTransactions InventoryTransaction[]
 }
 
 model Recipe {
@@ -79,6 +81,7 @@ model ProductionBatch {
   recipe           Recipe   @relation(fields: [recipeId], references: [id])
   orderId          String?
   order            Order? @relation(fields: [orderId], references: [id])
+  inventoryTransactions InventoryTransaction[]
 }
 
 model FinishedInventory {
@@ -174,4 +177,28 @@ model InventoryAdjustment {
   createdAt        DateTime @default(now())
 
   rawIngredient RawIngredient @relation(fields: [rawIngredientId], references: [id], onDelete: Cascade)
+}
+
+enum InventoryTransactionType {
+  PURCHASE
+  PRODUCTION
+  ADJUSTMENT
+  WASTE
+}
+
+model InventoryTransaction {
+  id                  String                   @id @default(cuid())
+  rawIngredientId     String
+  type                InventoryTransactionType
+  quantityChangeKg    Float
+  previousWeightKg    Float
+  newWeightKg         Float
+  reason              String?
+  purchaseId          String?
+  productionBatchId   String?
+  createdAt           DateTime                 @default(now())
+
+  rawIngredient       RawIngredient            @relation(fields: [rawIngredientId], references: [id])
+  purchase            Purchase?                @relation(fields: [purchaseId], references: [id])
+  productionBatch     ProductionBatch?         @relation(fields: [productionBatchId], references: [id])
 }
