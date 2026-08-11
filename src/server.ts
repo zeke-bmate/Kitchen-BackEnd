@@ -323,7 +323,7 @@ app.post(
       for (const item of items) {
         const orderUnits = item.orderUnits;
         const weightKg = item.weightKg;
-        const pricePerKg = item.pricePerKg;
+        const totalPrice = item.totalPrice;
         const rawIngredientId = item.rawIngredientId;
         const newIngredientName = item.newIngredientName;
 
@@ -346,13 +346,13 @@ app.post(
           });
         }
 
-        if (!isPositiveNumber(pricePerKg)) {
+        if (!isPositiveNumber(totalPrice)) {
           return res.status(422).json({
-            error: "Price per KG must be greater than zero.",
+            error: "Total price must be greater than zero.",
           });
         }
 
-        const totalPrice = weightKg * pricePerKg;
+        const pricePerKg = Math.round((totalPrice / weightKg) * 100) / 100;
 
         validatedItems.push({
           orderUnits:
