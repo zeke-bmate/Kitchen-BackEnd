@@ -6,6 +6,7 @@ import { parse } from "csv-parse/sync"
 import jwt from "jsonwebtoken";
 import bcrypt from "bcryptjs";
 import { OrderStatus } from "@prisma/client";
+import { MeasurementUnit } from "@prisma/client";
 
 const app = express();
 
@@ -260,16 +261,28 @@ app.post("/api/suppliers", verifyToken, requireRole("Admin", "Echo"), async (req
     res.status(201).json(supplier);
 });
 
-app.get("/api/purchases", verifyToken, requireRole("Admin", "Echo"), async (req, res) => {
+app.get(
+  "/api/purchases",
+  verifyToken,
+  requireRole("Admin", "Echo"),
+  async (req, res) => {
     const purchases = await prisma.purchase.findMany({
-        include: { 
-            supplier: true,
-            items: true,
+      include: {
+        supplier: true,
+        items: {
+          include: {
+            rawIngredient: true,
+          },
         },
-        orderBy: { createdAt: "desc"},
+      },
+      orderBy: {
+        createdAt: "desc",
+      },
     });
+
     res.json(purchases);
-});
+  },
+);
 
 app.post(
   "/api/purchases",
@@ -309,25 +322,30 @@ app.post(
         });
       }
 
+      const validUnits = Object.values(MeasurementUnit);
+
       const validatedItems: {
         orderUnits: string | null;
-        weightKg: number;
-        pricePerKg: number;
+        quantity: number;
+        pricePerUnit: number;
         totalPrice: number;
         rawIngredientId?: string;
         newIngredientName?: string;
+        canonicalUnit?: MeasurementUnit;
       }[] = [];
 
       let purchaseTotal = 0;
 
       for (const item of items) {
         const orderUnits = item.orderUnits;
-        const weightKg = item.weightKg;
+        const quantity = item.quantity;
         const totalPrice = item.totalPrice;
         const rawIngredientId = item.rawIngredientId;
         const newIngredientName = item.newIngredientName;
+        const canonicalUnit = item.canonicalUnit;
 
         const hasExistingIngredient =
+
           isNonEmptyString(rawIngredientId);
 
         const hasNewIngredient =
@@ -340,9 +358,21 @@ app.post(
           });
         }
 
-        if (!isPositiveNumber(weightKg)) {
+        if (
+          hasNewIngredient &&
+          (
+            !isNonEmptyString(canonicalUnit) ||
+            !validUnits.includes(canonicalUnit as MeasurementUnit)
+          )
+        ) {
           return res.status(422).json({
-            error: "Weight must be greater than zero.",
+            error: "A valid canonical unit is required for new ingredients.",
+          });
+        }
+
+        if (!isPositiveNumber(quantity)) {
+          return res.status(422).json({
+            error: "Quantity must be greater than zero.",
           });
         }
 
@@ -352,15 +382,15 @@ app.post(
           });
         }
 
-        const pricePerKg = Math.round((totalPrice / weightKg) * 100) / 100;
+        const pricePerUnit = Math.round((totalPrice / quantity) * 100) / 100;
 
         validatedItems.push({
           orderUnits:
             typeof orderUnits === "string" && orderUnits.trim()
               ? orderUnits.trim()
               : null,
-          weightKg,
-          pricePerKg,
+          quantity,
+          pricePerUnit,
           totalPrice,
           ...(hasExistingIngredient && {
             rawIngredientId,
@@ -368,6 +398,7 @@ app.post(
           ...(hasNewIngredient && {
             newIngredientName:
               normalizeIngredientName(newIngredientName),
+            canonicalUnit: canonicalUnit as MeasurementUnit,
           }),
         });
 
@@ -378,18 +409,18 @@ app.post(
         const resolvedItems: {
           itemName: string;
           orderUnits: string | null;
-          weightKg: number;
-          pricePerKg: number;
+          quantity: number;
+          pricePerUnit: number;
           totalPrice: number;
           rawIngredientId: string;
-          previousWeightKg: number;
-          newWeightKg: number;
+          previousQuantity: number;
+          newQuantity: number;
         }[] = [];
 
         for (const item of validatedItems) {
           let rawIngredient;
-          let previousWeightKg: number;
-          let newWeightKg: number;
+          let previousQuantity: number;
+          let newQuantity: number;
 
           if (item.rawIngredientId) {
             rawIngredient = await tx.rawIngredient.findUnique({
@@ -402,20 +433,20 @@ app.post(
               throw new Error("RAW_INGREDIENT_NOT_FOUND");
             }
 
-            previousWeightKg = rawIngredient.currentWeightKg;
+            previousQuantity = rawIngredient.currentQuantity;
 
             const updatedIngredient = await tx.rawIngredient.update({
               where: {
                 id: rawIngredient.id,
               },
               data: {
-                currentWeightKg: {
-                  increment: item.weightKg,
+                currentQuantity: {
+                  increment: item.quantity,
                 },
               },
             });
 
-            newWeightKg = updatedIngredient.currentWeightKg;
+            newQuantity = updatedIngredient.currentQuantity;
           } else {
             const normalizedName = item.newIngredientName!;
 
@@ -432,27 +463,34 @@ app.post(
               );
             }
 
-            previousWeightKg = 0;
+            previousQuantity = 0;
+
+            const canonicalUnit = item.canonicalUnit;
+
+            if (!canonicalUnit) {
+              throw new Error("CANONICAL_UNIT_REQUIRED");
+            }
 
             rawIngredient = await tx.rawIngredient.create({
               data: {
                 name: normalizedName,
-                currentWeightKg: item.weightKg,
+                currentQuantity: item.quantity,
+                canonicalUnit,
               },
             });
 
-            newWeightKg = rawIngredient.currentWeightKg;
+            newQuantity = rawIngredient.currentQuantity;
           }
 
           resolvedItems.push({
             itemName: rawIngredient.name,
             orderUnits: item.orderUnits,
-            weightKg: item.weightKg,
-            pricePerKg: item.pricePerKg,
+            quantity: item.quantity,
+            pricePerUnit: item.pricePerUnit,
             totalPrice: item.totalPrice,
             rawIngredientId: rawIngredient.id,
-            previousWeightKg,
-            newWeightKg,
+            previousQuantity,
+            newQuantity,
           });
         }
 
@@ -465,8 +503,10 @@ app.post(
               create: resolvedItems.map((item) => ({
                 itemName: item.itemName,
                 orderUnits: item.orderUnits,
-                weightKg: item.weightKg,
-                pricePerKg: item.pricePerKg,
+
+                quantity: item.quantity,
+                pricePerUnit: item.pricePerUnit,
+
                 totalPrice: item.totalPrice,
                 rawIngredientId: item.rawIngredientId,
               })),
@@ -487,9 +527,9 @@ app.post(
             data: {
               rawIngredientId: item.rawIngredientId,
               type: "PURCHASE",
-              quantityChangeKg: item.weightKg,
-              previousWeightKg: item.previousWeightKg,
-              newWeightKg: item.newWeightKg,
+              quantityChange: item.quantity,
+              previousQuantity: item.previousQuantity,
+              newQuantity: item.newQuantity,
               purchaseId: purchase.id,
             },
           });
@@ -519,6 +559,15 @@ app.post(
 
         return res.status(409).json({
           error: `Ingredient "${ingredientName}" already exists. Select the existing ingredient instead.`,
+        });
+      }
+
+      if (
+        error instanceof Error &&
+        error.message === "CANONICAL_UNIT_REQUIRED"
+      ) {
+        return res.status(422).json({
+          error: "A canonical unit is required for new ingredients.",
         });
       }
 
@@ -593,7 +642,8 @@ app.get(
 
 app.post("/api/raw-ingredients", verifyToken, requireRole("Admin", "Echo"), async (req, res) => {
     const name = req.body.name;
-    const currentWeightKg = req.body.currentWeightKg;
+    const currentQuantity = req.body.currentQuantity;
+    const canonicalUnit = req.body.canonicalUnit;
 
     if (!isNonEmptyString(name)) {
         res.status(422).json({
@@ -602,11 +652,21 @@ app.post("/api/raw-ingredients", verifyToken, requireRole("Admin", "Echo"), asyn
         return;
     }
 
-    if (!isNonNegativeNumber(currentWeightKg)) {
-        res.status(422).json({
-            error: "Weight must be a non-negative number"
-        });
-        return;
+    if (!isNonNegativeNumber(currentQuantity)) {
+      return res.status(422).json({
+        error: "Quantity must be a non-negative number.",
+      });
+    }
+
+    const validUnits = ["KG", "L", "EACH", "BUNCH", "HEAD"];
+
+    if (
+      !isNonEmptyString(canonicalUnit) ||
+      !validUnits.includes(canonicalUnit)
+    ) {
+      return res.status(422).json({
+        error: "Canonical unit is invalid.",
+      });
     }
 
     const trimmedName = normalizeIngredientName(name);
@@ -624,7 +684,8 @@ app.post("/api/raw-ingredients", verifyToken, requireRole("Admin", "Echo"), asyn
     const ingredient = await prisma.rawIngredient.create({
         data: { 
             name: trimmedName,
-            currentWeightKg: currentWeightKg,
+            currentQuantity,
+            canonicalUnit,
             }
     });
 
@@ -634,12 +695,12 @@ app.post("/api/raw-ingredients", verifyToken, requireRole("Admin", "Echo"), asyn
 app.patch("/api/raw-ingredients/:id", verifyToken, requireRole("Admin", "Echo"), async (req,res) => {
 
     try {
-        const currentWeightKg = req.body.currentWeightKg;
+        const currentQuantity = req.body.currentQuantity;
 
-        if (!isNonNegativeNumber(currentWeightKg)) {
-            return res.status(422).json({
-                error: "Weight must be a non-negative number"
-            });
+        if (!isNonNegativeNumber(currentQuantity)) {
+          return res.status(422).json({
+            error: "Quantity must be a non-negative number.",
+          });
         }
 
         const ingredientId = req.params.id;
@@ -668,15 +729,15 @@ app.patch("/api/raw-ingredients/:id", verifyToken, requireRole("Admin", "Echo"),
               id: ingredientId,
             },
             data: {
-              currentWeightKg,
+              currentQuantity,
             },
           });
 
           await tx.inventoryAdjustment.create({
             data: {
               rawIngredientId: ingredientId,
-              previousWeightKg: existingIngredient.currentWeightKg,
-              newWeightKg: currentWeightKg,
+              previousQuantity: existingIngredient.currentQuantity,
+              newQuantity: currentQuantity,
               reason: reason?.trim() || null,
             },
           });
@@ -685,10 +746,10 @@ app.patch("/api/raw-ingredients/:id", verifyToken, requireRole("Admin", "Echo"),
             data: {
               rawIngredientId: ingredientId,
               type: "ADJUSTMENT",
-              quantityChangeKg:
-                currentWeightKg - existingIngredient.currentWeightKg,
-              previousWeightKg: existingIngredient.currentWeightKg,
-              newWeightKg: currentWeightKg,
+              quantityChange:
+                currentQuantity - existingIngredient.currentQuantity,
+              previousQuantity: existingIngredient.currentQuantity,
+              newQuantity: currentQuantity,
               reason: reason?.trim() || null,
             },
           });
@@ -749,22 +810,20 @@ app.post("/api/recipes", verifyToken, requireRole("Admin", "Echo"), async (req, 
     let ingredientsIdArray = [];
 
     for (const ingredient of ingredientsArray) {
-        const weightKg = ingredient.weightKg;
+        const quantity = ingredient.quantity;
 
-        if (!isPositiveNumber(weightKg)) {
-            res.status(422).json({
-                error: "Weight must be a positive number greater than zero"
+        if (!isPositiveNumber(quantity)) {
+            return res.status(422).json({
+                error: "Quantity must be a positive number greater than zero",
             });
-            return;
         }
 
         const ingredientId = ingredient.rawIngredientId;
 
         if (!isNonEmptyString(ingredientId)) {
-            res.status(422).json({
-                error: "Raw Ingredient ID must be of type String and non-empty"
+            return res.status(422).json({
+                error: "Raw Ingredient ID must be of type String and non-empty",
             });
-            return;
         }
 
         ingredientsIdArray.push(ingredientId);
@@ -813,7 +872,7 @@ app.post("/api/recipes", verifyToken, requireRole("Admin", "Echo"), async (req, 
             ingredients: {
                 create: ingredientsArray.map((i) => ({
                     rawIngredientId: i.rawIngredientId,
-                    weightKg: i.weightKg,
+                    quantity: i.quantity,
                 }))
             }
         },
@@ -915,12 +974,16 @@ app.post("/api/production-batches", verifyToken, requireRole("Admin", "Echo"), a
     const multiplier = quantityProduced;
     
     for (const ingredient of recipe.ingredients) {
-        const requiredKg = ingredient.weightKg * multiplier;
-        if (ingredient.rawIngredient.currentWeightKg < requiredKg) {
-            res.status(422).json({
-                error: `Insufficient weight: ${ingredient.rawIngredient.name}`
+        const requiredQuantity =
+            ingredient.quantity * multiplier;
+
+        if (
+            ingredient.rawIngredient.currentQuantity <
+            requiredQuantity
+        ) {
+            return res.status(422).json({
+                error: `Insufficient quantity: ${ingredient.rawIngredient.name}`,
             });
-            return;
         }
     }
 
@@ -944,19 +1007,20 @@ app.post("/api/production-batches", verifyToken, requireRole("Admin", "Echo"), a
         });
 
         for (const ingredient of recipe.ingredients) {
-            const requiredKg = ingredient.weightKg * multiplier;
+            const requiredQuantity =
+                ingredient.quantity * multiplier;
 
-            const previousWeightKg =
-                ingredient.rawIngredient.currentWeightKg;
+            const previousQuantity =
+                ingredient.rawIngredient.currentQuantity;
 
             const updatedIngredient = await tx.rawIngredient.update({
                 where: {
-                    id: ingredient.rawIngredientId
+                    id: ingredient.rawIngredientId,
                 },
                 data: {
-                    currentWeightKg: {
-                        decrement: requiredKg
-                    }
+                    currentQuantity: {
+                        decrement: requiredQuantity,
+                    },
                 },
             });
         
@@ -964,9 +1028,9 @@ app.post("/api/production-batches", verifyToken, requireRole("Admin", "Echo"), a
                 data: {
                     rawIngredientId: ingredient.rawIngredientId,
                     type: "PRODUCTION",
-                    quantityChangeKg: -requiredKg,
-                    previousWeightKg,
-                    newWeightKg: updatedIngredient.currentWeightKg,
+                    quantityChange: -requiredQuantity,
+                    previousQuantity,
+                    newQuantity: updatedIngredient.currentQuantity,
                     productionBatchId: production.id,
                 },
             });
@@ -1001,7 +1065,7 @@ app.get("/api/finished-inventory", verifyToken, requireRole("Admin", "DeePlace",
     res.json(finishedInventory);
 });
 
-app.post("/api/sales", requireRole("Admin", "DeePlace"), async (req, res) => {
+app.post("/api/sales", requireRole("Admin", "DeePlace"), verifyToken, async (req, res) => {
     const recipeId = req.body.recipeId;
 
     if (!isNonEmptyString(recipeId)) {
@@ -1069,73 +1133,101 @@ app.get("/api/sales", requireRole("Admin", "DeePlace"), verifyToken, async (req,
     res.json(sales);
 });
 
-app.get("/api/recipes/:id/cost", verifyToken, requireRole("Admin", "DeePlace", "Echo"), async (req, res) => {
+app.get(
+  "/api/recipes/:id/cost",
+  verifyToken,
+  requireRole("Admin", "DeePlace", "Echo"),
+  async (req, res) => {
     const recipeId = req.params.id;
 
     if (!isNonEmptyString(recipeId)) {
-        res.status(422).json({
-            error: "Recipe ID must be a non empty string"
-        });
-        return;
+      return res.status(422).json({
+        error: "Recipe ID must be a non-empty string.",
+      });
     }
 
     const recipe = await prisma.recipe.findUnique({
-        where : { id: recipeId},
-        include: {
-            ingredients : {
-                include : {
-                    rawIngredient: true
-                }
-            }
-        }
+      where: {
+        id: recipeId,
+      },
+      include: {
+        ingredients: {
+          include: {
+            rawIngredient: true,
+          },
+        },
+      },
     });
 
     if (!recipe) {
-        res.status(404).json({
-            error: "Recipe not found"
-        });
-        return;
+      return res.status(404).json({
+        error: "Recipe not found.",
+      });
     }
 
     let totalCost = 0;
-    let ingredientsArray = [];
+    const ingredientsArray = [];
 
     for (const ingredient of recipe.ingredients) {
-        const latestPrice = await prisma.purchase.findFirst({
-            where: { itemName: ingredient.rawIngredient.name},
-            orderBy: { date: "desc"}
+      const latestPurchaseItem =
+        await prisma.purchaseItem.findFirst({
+          where: {
+            rawIngredientId: ingredient.rawIngredientId,
+          },
+          include: {
+            purchase: true,
+          },
+          orderBy: {
+            purchase: {
+              date: "desc",
+            },
+          },
         });
 
-        if (!latestPrice) {
-            res.status(404).json({
-                error: `${ingredient.rawIngredient.name}: Purchase not found`
-            });
-            return;
-        }
-
-        const ingredientCost = Math.round((ingredient.weightKg * latestPrice.pricePerKg) * 100) / 100;
-        totalCost = Math.round((totalCost + ingredientCost) * 100) / 100;
-        ingredientsArray.push({
-            name: ingredient.rawIngredient.name,
-            weightKg: ingredient.weightKg,
-            pricePerKg: latestPrice.pricePerKg,
-            cost: ingredientCost
+      if (!latestPurchaseItem) {
+        return res.status(404).json({
+          error: `${ingredient.rawIngredient.name}: Purchase not found`,
         });
+      }
+
+      const ingredientCost =
+        Math.round(
+          ingredient.quantity *
+            latestPurchaseItem.pricePerUnit *
+            100
+        ) / 100;
+
+      totalCost =
+        Math.round((totalCost + ingredientCost) * 100) / 100;
+
+      ingredientsArray.push({
+        rawIngredientId: ingredient.rawIngredientId,
+        name: ingredient.rawIngredient.name,
+        quantity: ingredient.quantity,
+        canonicalUnit:
+          ingredient.rawIngredient.canonicalUnit,
+        pricePerUnit: latestPurchaseItem.pricePerUnit,
+        cost: ingredientCost,
+      });
     }
 
-    const costPerServing = Math.round((totalCost / recipe.servings) * 100) / 100;
+    const costPerServing =
+      Math.round(
+        (totalCost / recipe.servings) * 100
+      ) / 100;
 
     const response = {
-        recipeId: recipeId,
-        recipeName: recipe.name,
-        servings: recipe.servings,
-        totalCost: totalCost,
-        costPerServing: costPerServing,
-        ingredients: ingredientsArray,
-    }
+      recipeId: recipe.id,
+      recipeName: recipe.name,
+      servings: recipe.servings,
+      totalCost,
+      costPerServing,
+      ingredients: ingredientsArray,
+    };
 
-    res.status(200).json(response);
-});
+    return res.status(200).json(response);
+  },
+);
 
 app.post("/api/sales-import/preview", verifyToken, requireRole("Admin", "DeePlace"), upload.single("file"), async (req, res) => {
     if (!req.file) {
@@ -1363,7 +1455,7 @@ app.get("/api/dashboard", verifyToken, requireRole("Admin", "DeePlace", "Echo"),
 
     const lowStockIngredients = await prisma.rawIngredient.count({
         where: {
-            currentWeightKg: {
+            currentQuantity: {
                 lt: 1
             },
         },
@@ -1373,17 +1465,18 @@ app.get("/api/dashboard", verifyToken, requireRole("Admin", "DeePlace", "Echo"),
 
     const lowStockItems = await prisma.rawIngredient.findMany({
         where: {
-            currentWeightKg: {
-                lt: 1
-            }
+            currentQuantity: {
+                lt: 1,
+            },
         },
         select: {
             id: true,
             name: true,
-            currentWeightKg: true,
+            currentQuantity: true,
+            canonicalUnit: true,
         },
         orderBy: {
-            currentWeightKg: "asc",
+            currentQuantity: "asc",
         },
     });
 

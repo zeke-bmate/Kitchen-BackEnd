@@ -25,26 +25,35 @@ model Purchase {
 }
 
 model PurchaseItem {
-  id         String   @id @default(cuid())
-  purchaseId String
-  itemName   String
-  orderUnits String?
-  weightKg   Float
-  pricePerKg Float
-  totalPrice Float
-  purchase   Purchase @relation(fields: [purchaseId], references: [id])
+  id              String         @id @default(cuid())
+  purchaseId      String
+  itemName        String
+  orderUnits      String?
+  quantity        Float
+  pricePerUnit    Float
+  totalPrice      Float
+  purchase        Purchase       @relation(fields: [purchaseId], references: [id])
   rawIngredientId String?
   rawIngredient   RawIngredient? @relation(fields: [rawIngredientId], references: [id])
 }
 
+enum MeasurementUnit {
+  KG
+  L
+  EACH
+  BUNCH
+  HEAD
+}
+
 model RawIngredient {
-  id                String             @id @default(cuid())
-  name              String             @unique
-  currentWeightKg   Float
-  createdAt         DateTime           @default(now())
-  recipeIngredients RecipeIngredient[]
-  purchaseItems PurchaseItem[]
-  inventoryAdjustments InventoryAdjustment[]
+  id                    String                 @id @default(cuid())
+  name                  String                 @unique
+  currentQuantity       Float
+  canonicalUnit         MeasurementUnit        @default(KG)
+  createdAt             DateTime               @default(now())
+  recipeIngredients     RecipeIngredient[]
+  purchaseItems         PurchaseItem[]
+  inventoryAdjustments  InventoryAdjustment[]
   inventoryTransactions InventoryTransaction[]
 }
 
@@ -63,14 +72,14 @@ model Recipe {
 }
 
 model RecipeIngredient {
-  id              String        @id @default(cuid())
-  recipeId        String
-  rawIngredientId String
-  weightKg        Float
-  rawIngredient   RawIngredient @relation(fields: [rawIngredientId], references: [id])
-  recipe          Recipe        @relation(fields: [recipeId], references: [id])
-
-  @@unique([recipeId, rawIngredientId])
+    id              String        @id @default(cuid())
+    recipeId        String
+    rawIngredientId String
+    quantity        Float
+    rawIngredient   RawIngredient @relation(fields: [rawIngredientId], references: [id])
+    recipe          Recipe        @relation(fields: [recipeId], references: [id])
+  
+    @@unique([recipeId, rawIngredientId])
 }
 
 model ProductionBatch {
@@ -169,12 +178,12 @@ model OrderStatusLog {
 
 
 model InventoryAdjustment {
-  id               String   @id @default(cuid())
-  rawIngredientId  String
-  previousWeightKg Float
-  newWeightKg      Float
-  reason           String?
-  createdAt        DateTime @default(now())
+  id                String   @id @default(cuid())
+  rawIngredientId   String
+  previousQuantity  Float
+  newQuantity       Float
+  reason            String?
+  createdAt         DateTime @default(now())
 
   rawIngredient RawIngredient @relation(fields: [rawIngredientId], references: [id], onDelete: Cascade)
 }
@@ -190,9 +199,9 @@ model InventoryTransaction {
   id                  String                   @id @default(cuid())
   rawIngredientId     String
   type                InventoryTransactionType
-  quantityChangeKg    Float
-  previousWeightKg    Float
-  newWeightKg         Float
+  quantityChange      Float
+  previousQuantity    Float
+  newQuantity         Float
   reason              String?
   purchaseId          String?
   productionBatchId   String?
