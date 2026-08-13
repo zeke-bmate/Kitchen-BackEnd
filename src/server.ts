@@ -620,6 +620,7 @@ app.get(
                 recipe: true,
               },
             },
+            inventoryTransfer: true,
           },
           orderBy: {
             createdAt: "desc",
@@ -1565,7 +1566,23 @@ app.get("/api/orders/:id", verifyToken, async (req,res) => {
 });
 
 app.post("/api/orders", verifyToken, requireRole("Admin", "DeePlace", "Echo"), async (req, res) => {
-    const { recipeId, quantity } = req.body;
+    const { recipeId, quantity, location } = req.body;
+
+    const validOrderLocations = [
+      "DEE_PLACE",
+      "ECHO_POKER",
+      "ECHO_EVENTS",
+    ];
+
+    if (
+      !isNonEmptyString(location) ||
+      !validOrderLocations.includes(location)
+    ) {
+      return res.status(400).json({
+        error:
+          "Location must be DeePlace, Echo Poker, or Echo Events.",
+      });
+    }
 
     if (!isNonEmptyString(recipeId)) {
         return res.status(400).json({ error: "Recipe ID is required." });
@@ -1590,6 +1607,7 @@ app.post("/api/orders", verifyToken, requireRole("Admin", "DeePlace", "Echo"), a
             data: {
                 recipeId,
                 quantity,
+                location,
             },
             include: {
                 recipe: true,
@@ -1614,7 +1632,6 @@ app.post("/api/orders", verifyToken, requireRole("Admin", "DeePlace", "Echo"), a
             error: "Failed to create order."
         })
     }
-    
 });
 
 const nextStatus: Partial<Record<OrderStatus, OrderStatus>> = {
@@ -1700,6 +1717,228 @@ app.patch("/api/orders/:id/status", verifyToken, requireRole("Admin", "DeePlace"
         });
    }
 });
+
+app.get(
+  "/api/inventory-transfers",
+  verifyToken,
+  requireRole("Admin", "Echo"),
+  async (req, res) => {
+    try {
+      const transfers = await prisma.inventoryTransfer.findMany({
+        orderBy: {
+          createdAt: "desc",
+        },
+        include: {
+          items: {
+            include: {
+              rawIngredient: true,
+            },
+          },
+        },
+      });
+
+      return res.status(200).json(transfers);
+    } catch (error) {
+      console.error(error);
+
+      return res.status(500).json({
+        error: "Failed to load inventory transfers.",
+      });
+    }
+  },
+);
+
+app.post(
+  "/api/inventory-transfers",
+  verifyToken,
+  requireRole("Admin", "Echo"),
+  async (req, res) => {
+    try {
+      const {
+        sourceLocation,
+        destinationLocation,
+        items,
+      } = req.body;
+
+      const isValidTransfer =
+        (sourceLocation === "ECHO_KITCHEN" &&
+          destinationLocation === "DEE_PLACE") ||
+        (sourceLocation === "DEE_PLACE" &&
+          destinationLocation === "ECHO_KITCHEN");
+      
+      if (!isValidTransfer) {
+        return res.status(400).json({
+          error:
+            "Transfers are only supported between Echo Kitchen and DeePlace.",
+        });
+      }
+
+      if (!Array.isArray(items) || items.length === 0) {
+        return res.status(400).json({
+          error: "At least one transfer item is required.",
+        });
+      }
+      
+      for (const item of items) {
+        if (
+          typeof item.rawIngredientId !== "string" ||
+          item.rawIngredientId.trim() === ""
+        ) {
+          return res.status(400).json({
+            error: "Each transfer item requires a raw ingredient.",
+          });
+        }
+      
+        if (
+          typeof item.quantity !== "number" ||
+          !Number.isFinite(item.quantity) ||
+          item.quantity <= 0
+        ) {
+          return res.status(400).json({
+            error: "Transfer quantities must be greater than 0.",
+          });
+        }
+      }
+
+      const rawIngredientIds = items.map(
+        (item) => item.rawIngredientId
+      );
+      
+      if (
+        new Set(rawIngredientIds).size !==
+        rawIngredientIds.length
+      ) {
+        return res.status(400).json({
+          error:
+            "The same ingredient cannot appear more than once in a transfer.",
+        });
+      }
+
+      const result = await prisma.$transaction(async (tx) => {
+        const transfer = await tx.inventoryTransfer.create({
+          data: {
+            sourceLocation,
+            destinationLocation,
+          },
+        });
+    
+        for (const item of items) {
+          const rawIngredient = await tx.rawIngredient.findUnique({
+            where: {
+              id: item.rawIngredientId,
+            },
+          });
+      
+          if (!rawIngredient) {
+            throw new Error("RAW_INGREDIENT_NOT_FOUND");
+          }
+      
+          const previousQuantity = rawIngredient.currentQuantity;
+      
+          let updatedIngredient;
+      
+          if (sourceLocation === "ECHO_KITCHEN") {
+            if (previousQuantity < item.quantity) {
+              throw new Error(
+                `INSUFFICIENT_INVENTORY:${rawIngredient.name}`,
+              );
+            }
+        
+            updatedIngredient = await tx.rawIngredient.update({
+              where: {
+                id: rawIngredient.id,
+              },
+              data: {
+                currentQuantity: {
+                  decrement: item.quantity,
+                },
+              },
+            });
+          } else {
+            updatedIngredient = await tx.rawIngredient.update({
+              where: {
+                id: rawIngredient.id,
+              },
+              data: {
+                currentQuantity: {
+                  increment: item.quantity,
+                },
+              },
+            });
+          }
+      
+          await tx.inventoryTransferItem.create({
+            data: {
+              transferId: transfer.id,
+              rawIngredientId: rawIngredient.id,
+              quantity: item.quantity,
+            },
+          });
+      
+          await tx.inventoryTransaction.create({
+            data: {
+              rawIngredientId: rawIngredient.id,
+              type:
+                sourceLocation === "ECHO_KITCHEN"
+                  ? "TRANSFER_OUT"
+                  : "TRANSFER_IN",
+              quantityChange:
+                sourceLocation === "ECHO_KITCHEN"
+                  ? -item.quantity
+                  : item.quantity,
+              previousQuantity,
+              newQuantity: updatedIngredient.currentQuantity,
+              inventoryTransferId: transfer.id,
+            },
+          });
+        }
+    
+        return tx.inventoryTransfer.findUnique({
+          where: {
+            id: transfer.id,
+          },
+          include: {
+            items: {
+              include: {
+                rawIngredient: true,
+              },
+            },
+            inventoryTransactions: true,
+          },
+        });
+      });
+      
+      return res.status(201).json(result);
+
+    } catch (error) {
+      console.error(error);
+    
+      if (
+        error instanceof Error &&
+        error.message === "RAW_INGREDIENT_NOT_FOUND"
+      ) {
+        return res.status(404).json({
+          error: "Raw ingredient not found.",
+        });
+      }
+    
+      if (
+        error instanceof Error &&
+        error.message.startsWith("INSUFFICIENT_INVENTORY:")
+      ) {
+        const ingredientName = error.message.split(":")[1];
+    
+        return res.status(422).json({
+          error: `Insufficient Echo Kitchen inventory for ${ingredientName}.`,
+        });
+      }
+    
+      return res.status(500).json({
+        error: "Failed to create inventory transfer.",
+      });
+    }
+  }
+);
 
 function isNonEmptyString(value: unknown): boolean {
     if (typeof value === 'string') {
