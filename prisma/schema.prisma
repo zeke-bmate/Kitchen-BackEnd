@@ -55,6 +55,7 @@ model RawIngredient {
   purchaseItems         PurchaseItem[]
   inventoryAdjustments  InventoryAdjustment[]
   inventoryTransactions InventoryTransaction[]
+  transferItems         InventoryTransferItem[]
 }
 
 model Recipe {
@@ -164,6 +165,7 @@ model Order {
   recipeId  String?
   recipe    Recipe? @relation(fields: [recipeId], references: [id])
   productionBatches ProductionBatch[]
+  location   Location?
 }
 
 model OrderStatusLog {
@@ -192,7 +194,8 @@ enum InventoryTransactionType {
   PURCHASE
   PRODUCTION
   ADJUSTMENT
-  WASTE
+  TRANSFER_IN
+  TRANSFER_OUT
 }
 
 model InventoryTransaction {
@@ -205,9 +208,37 @@ model InventoryTransaction {
   reason              String?
   purchaseId          String?
   productionBatchId   String?
+  inventoryTransferId String?
   createdAt           DateTime                 @default(now())
 
   rawIngredient       RawIngredient            @relation(fields: [rawIngredientId], references: [id])
   purchase            Purchase?                @relation(fields: [purchaseId], references: [id])
   productionBatch     ProductionBatch?         @relation(fields: [productionBatchId], references: [id])
+  inventoryTransfer   InventoryTransfer?        @relation(fields: [inventoryTransferId], references: [id])
+}
+
+enum Location {
+  ECHO_KITCHEN
+  DEE_PLACE
+  ECHO_POKER
+  ECHO_EVENTS
+}
+
+model InventoryTransfer {
+  id                  String                  @id @default(cuid())
+  sourceLocation      Location
+  destinationLocation Location
+  createdAt           DateTime                @default(now())
+  items               InventoryTransferItem[]
+  inventoryTransactions InventoryTransaction[]
+}
+
+model InventoryTransferItem {
+  id              String            @id @default(cuid())
+  transferId      String
+  rawIngredientId String
+  quantity        Float
+
+  transfer        InventoryTransfer @relation(fields: [transferId], references: [id], onDelete: Cascade)
+  rawIngredient   RawIngredient     @relation(fields: [rawIngredientId], references: [id])
 }
