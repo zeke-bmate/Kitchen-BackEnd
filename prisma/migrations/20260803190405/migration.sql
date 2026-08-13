@@ -1,7 +1,5 @@
--- RedefineTables
-PRAGMA defer_foreign_keys=ON;
-PRAGMA foreign_keys=OFF;
-CREATE TABLE "new_Order" (
+-- CreateTable
+CREATE TABLE "Order" (
     "id" TEXT NOT NULL PRIMARY KEY,
     "product" TEXT,
     "quantity" INTEGER NOT NULL,
@@ -11,9 +9,20 @@ CREATE TABLE "new_Order" (
     "recipeId" TEXT,
     CONSTRAINT "Order_recipeId_fkey" FOREIGN KEY ("recipeId") REFERENCES "Recipe" ("id") ON DELETE SET NULL ON UPDATE CASCADE
 );
-INSERT INTO "new_Order" ("createdAt", "id", "product", "quantity", "status", "updatedAt") SELECT "createdAt", "id", "product", "quantity", "status", "updatedAt" FROM "Order";
-DROP TABLE "Order";
-ALTER TABLE "new_Order" RENAME TO "Order";
+
+-- CreateTable
+CREATE TABLE "OrderStatusLog" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "orderId" TEXT NOT NULL,
+    "previousStatus" TEXT,
+    "newStatus" TEXT NOT NULL,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT "OrderStatusLog_orderId_fkey" FOREIGN KEY ("orderId") REFERENCES "Order" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
+
+-- RedefineTables
+PRAGMA defer_foreign_keys=ON;
+PRAGMA foreign_keys=OFF;
 CREATE TABLE "new_ProductionBatch" (
     "id" TEXT NOT NULL PRIMARY KEY,
     "recipeId" TEXT NOT NULL,
