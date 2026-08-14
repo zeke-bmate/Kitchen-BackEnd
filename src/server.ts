@@ -578,6 +578,365 @@ app.post(
   },
 );
 
+app.patch(
+  "/api/purchases/:id",
+  verifyToken,
+  requireRole("Admin", "Echo"),
+  async (req, res) => {
+    try {
+      const purchaseId = req.params.id;
+
+      if (!isNonEmptyString(purchaseId)) {
+        return res.status(422).json({
+          error: "Purchase ID must be a non-empty string.",
+        });
+      }
+
+      const {
+        purchase,
+        locked,
+      } = await getPurchaseEditLock(purchaseId);
+
+      if (!purchase) {
+        return res.status(404).json({
+          error: "Purchase not found.",
+        });
+      }
+
+      if (locked) {
+        return res.status(409).json({
+          error:
+            "Purchase cannot be edited because its inventory has already had later activity.",
+        });
+      }
+
+      const items = req.body.items;
+      const date = req.body.date;
+      const supplierId = req.body.supplierId;
+      const reason = req.body.reason;
+
+      if (!Array.isArray(items) || items.length === 0) {
+        return res.status(422).json({
+          error: "Items must be a non-empty array.",
+        });
+      }
+      
+      if (!isValidDate(date)) {
+        return res.status(422).json({
+          error: "Date must be a valid string.",
+        });
+      }
+      
+      if (!isNonEmptyString(supplierId)) {
+        return res.status(422).json({
+          error: "Supplier ID must be a non-empty string.",
+        });
+      }
+      
+      if (!isNonEmptyString(reason)) {
+        return res.status(422).json({
+          error: "Correction reason must be a non-empty string.",
+        });
+      }
+
+      const existingSupplier = await prisma.supplier.findUnique({
+        where: {
+          id: supplierId,
+        },
+      });
+      
+      if (!existingSupplier) {
+        return res.status(404).json({
+          error: "Supplier does not exist.",
+        });
+      }
+
+      const validatedItems: {
+        rawIngredientId: string;
+        orderUnits: string | null;
+        quantity: number;
+        pricePerUnit: number;
+        totalPrice: number;
+      }[] = [];
+      
+      let purchaseTotal = 0;
+      
+      for (const item of items) {
+        const rawIngredientId = item.rawIngredientId;
+        const orderUnits = item.orderUnits;
+        const quantity = item.quantity;
+        const totalPrice = item.totalPrice;
+      
+        if (!isNonEmptyString(rawIngredientId)) {
+          return res.status(422).json({
+            error: "Each item must reference an existing raw ingredient.",
+          });
+        }
+    
+        if (!isPositiveNumber(quantity)) {
+          return res.status(422).json({
+            error: "Quantity must be greater than zero.",
+          });
+        }
+    
+        if (!isPositiveNumber(totalPrice)) {
+          return res.status(422).json({
+            error: "Total price must be greater than zero.",
+          });
+        }
+    
+        const rawIngredient = await prisma.rawIngredient.findUnique({
+          where: {
+            id: rawIngredientId,
+          },
+        });
+    
+        if (!rawIngredient) {
+          return res.status(404).json({
+            error: "Raw ingredient not found.",
+          });
+        }
+    
+        const pricePerUnit =
+          Math.round((totalPrice / quantity) * 100) / 100;
+    
+        validatedItems.push({
+          rawIngredientId,
+          orderUnits:
+            typeof orderUnits === "string" && orderUnits.trim()
+              ? orderUnits.trim()
+              : null,
+          quantity,
+          pricePerUnit,
+          totalPrice,
+        });
+    
+        purchaseTotal += totalPrice;
+      }
+
+      const rawIngredientIds = validatedItems.map(
+        (item) => item.rawIngredientId,
+      );
+      
+      if (
+        new Set(rawIngredientIds).size !== rawIngredientIds.length
+      ) {
+        return res.status(422).json({
+          error:
+            "The same raw ingredient cannot appear more than once in a purchase.",
+        });
+      }
+
+      const result = await prisma.$transaction(async (tx) => {
+      const existingPurchase = await tx.purchase.findUnique({
+        where: {
+          id: purchaseId,
+        },
+        include: {
+          items: true,
+        },
+      });
+
+      if (!existingPurchase) {
+        throw new Error("PURCHASE_NOT_FOUND");
+      }
+
+      // Reverse original purchase inventory effects
+      for (const item of existingPurchase.items) {
+        if (!item.rawIngredientId) {
+          throw new Error("PURCHASE_ITEM_NOT_LINKED");
+        }
+
+        const rawIngredient = await tx.rawIngredient.findUnique({
+          where: {
+            id: item.rawIngredientId,
+          },
+        });
+
+        if (!rawIngredient) {
+          throw new Error("RAW_INGREDIENT_NOT_FOUND");
+        }
+
+        if (rawIngredient.currentQuantity < item.quantity) {
+          throw new Error(
+            `INSUFFICIENT_INVENTORY_TO_REVERSE:${rawIngredient.name}`,
+          );
+        }
+
+        await tx.rawIngredient.update({
+          where: {
+            id: rawIngredient.id,
+          },
+          data: {
+            currentQuantity: {
+              decrement: item.quantity,
+            },
+          },
+        });
+      }
+
+      // Remove old purchase ledger entries
+      await tx.inventoryTransaction.deleteMany({
+        where: {
+          purchaseId,
+          type: "PURCHASE",
+        },
+      });
+
+      // Remove old purchase items
+      await tx.purchaseItem.deleteMany({
+        where: {
+          purchaseId,
+        },
+      });
+
+      const resolvedItems: {
+        itemName: string;
+        orderUnits: string | null;
+        quantity: number;
+        pricePerUnit: number;
+        totalPrice: number;
+        rawIngredientId: string;
+        previousQuantity: number;
+        newQuantity: number;
+      }[] = [];
+
+      // Apply corrected inventory
+      for (const item of validatedItems) {
+        const rawIngredient = await tx.rawIngredient.findUnique({
+          where: {
+            id: item.rawIngredientId,
+          },
+        });
+
+        if (!rawIngredient) {
+          throw new Error("RAW_INGREDIENT_NOT_FOUND");
+        }
+
+        const previousQuantity = rawIngredient.currentQuantity;
+
+        const updatedIngredient = await tx.rawIngredient.update({
+          where: {
+            id: rawIngredient.id,
+          },
+          data: {
+            currentQuantity: {
+              increment: item.quantity,
+            },
+          },
+        });
+
+        resolvedItems.push({
+          itemName: rawIngredient.name,
+          orderUnits: item.orderUnits,
+          quantity: item.quantity,
+          pricePerUnit: item.pricePerUnit,
+          totalPrice: item.totalPrice,
+          rawIngredientId: rawIngredient.id,
+          previousQuantity,
+          newQuantity: updatedIngredient.currentQuantity,
+        });
+      }
+
+      const updatedPurchase = await tx.purchase.update({
+        where: {
+          id: purchaseId,
+        },
+        data: {
+          date: new Date(`${date}T12:00:00`),
+          supplierId,
+          totalPrice: purchaseTotal,
+          items: {
+            create: resolvedItems.map((item) => ({
+              itemName: item.itemName,
+              orderUnits: item.orderUnits,
+              quantity: item.quantity,
+              pricePerUnit: item.pricePerUnit,
+              totalPrice: item.totalPrice,
+              rawIngredientId: item.rawIngredientId,
+            })),
+          },
+        },
+        include: {
+          supplier: true,
+          items: {
+            include: {
+              rawIngredient: true,
+            },
+          },
+        },
+      });
+
+      for (const item of resolvedItems) {
+        await tx.inventoryTransaction.create({
+          data: {
+            rawIngredientId: item.rawIngredientId,
+            type: "PURCHASE",
+            quantityChange: item.quantity,
+            previousQuantity: item.previousQuantity,
+            newQuantity: item.newQuantity,
+            purchaseId: updatedPurchase.id,
+            reason: `Purchase correction: ${reason.trim()}`,
+          },
+        });
+      }
+
+      return updatedPurchase;
+    });
+
+    return res.status(200).json(result);
+
+    } catch (error) {
+      console.error(error);
+
+      if (
+        error instanceof Error &&
+        error.message === "PURCHASE_NOT_FOUND"
+      ) {
+        return res.status(404).json({
+          error: "Purchase not found.",
+        });
+      }
+
+      if (
+        error instanceof Error &&
+        error.message === "PURCHASE_ITEM_NOT_LINKED"
+      ) {
+        return res.status(409).json({
+          error:
+            "Purchase cannot be edited because one or more original items are not linked to a raw ingredient.",
+        });
+      }
+      
+      if (
+        error instanceof Error &&
+        error.message === "RAW_INGREDIENT_NOT_FOUND"
+      ) {
+        return res.status(404).json({
+          error: "Raw ingredient not found.",
+        });
+      }
+      
+      if (
+        error instanceof Error &&
+        error.message.startsWith(
+          "INSUFFICIENT_INVENTORY_TO_REVERSE:",
+        )
+      ) {
+        const ingredientName = error.message.split(":")[1];
+      
+        return res.status(409).json({
+          error: `Purchase cannot be edited because inventory for ${ingredientName} has already been consumed or transferred.`,
+        });
+      }
+
+      return res.status(500).json({
+        error: "Failed to update purchase.",
+      });
+    }
+  },
+);
+
 app.get("/api/raw-ingredients", verifyToken, requireRole("Admin", "Echo"), async (req, res) => {
     const ingredients = await prisma.rawIngredient.findMany({
         orderBy: { name: "asc"},
@@ -1976,6 +2335,79 @@ function isNonNegativeNumber(num: unknown): boolean {
 function normalizeIngredientName(name: string) {
     return name.trim().toLowerCase();
 }
+
+const getPurchaseEditLock = async (
+  purchaseId: string,
+) => {
+  const purchase = await prisma.purchase.findUnique({
+    where: {
+      id: purchaseId,
+    },
+    include: {
+      items: true,
+    },
+  });
+
+  if (!purchase) {
+    return {
+      purchase: null,
+      locked: false,
+    };
+  }
+
+  const ingredientIds = purchase.items
+    .map((item) => item.rawIngredientId)
+    .filter((id): id is string => id !== null);
+
+  if (ingredientIds.length === 0) {
+    return {
+      purchase,
+      locked: false,
+    };
+  }
+
+  const purchaseTransactions =
+    await prisma.inventoryTransaction.findMany({
+      where: {
+        purchaseId,
+        type: "PURCHASE",
+      },
+    });
+
+  if (purchaseTransactions.length === 0) {
+    return {
+      purchase,
+      locked: true,
+    };
+  }
+
+  for (const transaction of purchaseTransactions) {
+    const laterTransaction =
+      await prisma.inventoryTransaction.findFirst({
+        where: {
+          rawIngredientId: transaction.rawIngredientId,
+          createdAt: {
+            gt: transaction.createdAt,
+          },
+        },
+        orderBy: {
+          createdAt: "asc",
+        },
+      });
+
+    if (laterTransaction) {
+      return {
+        purchase,
+        locked: true,
+      };
+    }
+  }
+
+  return {
+    purchase,
+    locked: false,
+  };
+};
 
 app.listen(3001, () => {
     console.log("Server running on http://localhost:3001");
