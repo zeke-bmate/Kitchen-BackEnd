@@ -293,6 +293,7 @@ app.post(
       const items = req.body.items;
       const date = req.body.date;
       const supplierId = req.body.supplierId;
+      const taxRate = req.body.taxRate;
 
       if (!Array.isArray(items) || items.length === 0) {
         return res.status(422).json({
@@ -309,6 +310,18 @@ app.post(
       if (!isNonEmptyString(supplierId)) {
         return res.status(422).json({
           error: "Supplier ID must be a non-empty string.",
+        });
+      }
+
+      const taxRateNum = taxRate === undefined || taxRate === null || taxRate === ""   ? 0   : Number(taxRate);
+
+      if (
+        Number.isNaN(taxRateNum) ||
+        taxRateNum < 0 ||
+        taxRateNum > 100
+      ) {
+        return res.status(422).json({
+          error: "Tax rate must be between 0 and 100.",
         });
       }
 
@@ -334,7 +347,7 @@ app.post(
         canonicalUnit?: MeasurementUnit;
       }[] = [];
 
-      let purchaseTotal = 0;
+      let purchaseSubtotal = 0;
 
       for (const item of items) {
         const orderUnits = item.orderUnits;
@@ -402,8 +415,12 @@ app.post(
           }),
         });
 
-        purchaseTotal += totalPrice;
+        purchaseSubtotal += totalPrice;
       }
+
+      const subtotal = Math.round(purchaseSubtotal * 100) / 100;
+      const taxAmount = Math.round(subtotal * (taxRateNum / 100) * 100) / 100;
+      const purchaseTotal = Math.round((subtotal + taxAmount) * 100) / 100;
 
       const result = await prisma.$transaction(async (tx) => {
         const resolvedItems: {
@@ -498,6 +515,9 @@ app.post(
           data: {
             date: new Date(`${date}T12:00:00`),
             supplierId,
+            subtotal,
+            taxRate: taxRateNum,
+            taxAmount,
             totalPrice: purchaseTotal,
             items: {
               create: resolvedItems.map((item) => ({
@@ -614,6 +634,7 @@ app.patch(
       const date = req.body.date;
       const supplierId = req.body.supplierId;
       const reason = req.body.reason;
+      const taxRate = req.body.taxRate;
 
       if (!Array.isArray(items) || items.length === 0) {
         return res.status(422).json({
@@ -639,6 +660,18 @@ app.patch(
         });
       }
 
+      const taxRateNum = taxRate === undefined || taxRate === null || taxRate === ""   ? 0   : Number(taxRate);
+
+      if (
+        Number.isNaN(taxRateNum) ||
+        taxRateNum < 0 ||
+        taxRateNum > 100
+      ) {
+        return res.status(422).json({
+          error: "Tax rate must be between 0 and 100.",
+        });
+      }
+
       const existingSupplier = await prisma.supplier.findUnique({
         where: {
           id: supplierId,
@@ -659,7 +692,7 @@ app.patch(
         totalPrice: number;
       }[] = [];
       
-      let purchaseTotal = 0;
+      let purchaseSubtotal = 0;
       
       for (const item of items) {
         const rawIngredientId = item.rawIngredientId;
@@ -711,8 +744,14 @@ app.patch(
           totalPrice,
         });
     
-        purchaseTotal += totalPrice;
+        purchaseSubtotal += totalPrice;
       }
+
+      const subtotal = Math.round(purchaseSubtotal * 100) / 100;
+        
+      const taxAmount = Math.round(subtotal * (taxRateNum / 100) * 100) / 100;
+    
+      const purchaseTotal = Math.round((subtotal + taxAmount) * 100) / 100;
 
       const rawIngredientIds = validatedItems.map(
         (item) => item.rawIngredientId,
@@ -845,6 +884,9 @@ app.patch(
         data: {
           date: new Date(`${date}T12:00:00`),
           supplierId,
+          subtotal,
+          taxRate: taxRateNum,
+          taxAmount,
           totalPrice: purchaseTotal,
           items: {
             create: resolvedItems.map((item) => ({

@@ -16,6 +16,9 @@ model Supplier {
 model Purchase {
   id         String         @id @default(cuid())
   date       DateTime
+  subtotal    Float    @default(0)
+  taxRate     Float    @default(0)
+  taxAmount   Float    @default(0)
   totalPrice Float
   supplierId String
   createdAt  DateTime       @default(now())
