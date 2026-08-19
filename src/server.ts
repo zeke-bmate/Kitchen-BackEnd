@@ -1597,95 +1597,126 @@ app.get(
   verifyToken,
   requireRole("Admin", "DeePlace", "Echo"),
   async (req, res) => {
-    const recipeId = req.params.id;
-
-    if (!isNonEmptyString(recipeId)) {
-      return res.status(422).json({
-        error: "Recipe ID must be a non-empty string.",
-      });
-    }
-
-    const recipe = await prisma.recipe.findUnique({
-      where: {
-        id: recipeId,
-      },
-      include: {
-        ingredients: {
-          include: {
-            rawIngredient: true,
-          },
-        },
-      },
-    });
-
-    if (!recipe) {
-      return res.status(404).json({
-        error: "Recipe not found.",
-      });
-    }
-
-    let totalCost = 0;
-    const ingredientsArray = [];
-
-    for (const ingredient of recipe.ingredients) {
-      const latestPurchaseItem =
-        await prisma.purchaseItem.findFirst({
-          where: {
-            rawIngredientId: ingredient.rawIngredientId,
-          },
-          include: {
-            purchase: true,
-          },
-          orderBy: {
-            purchase: {
-              date: "desc",
-            },
-          },
-        });
-
-      if (!latestPurchaseItem) {
-        return res.status(404).json({
-          error: `${ingredient.rawIngredient.name}: Purchase not found`,
+    try {
+      const recipeId = req.params.id;
+      
+      if (!isNonEmptyString(recipeId)) {
+        return res.status(422).json({
+          error: "Recipe ID must be a non-empty string.",
         });
       }
-
-      const ingredientCost =
-        Math.round(
-          ingredient.quantity *
-            latestPurchaseItem.pricePerUnit *
-            100
+  
+      const recipe = await prisma.recipe.findUnique({
+        where: {
+          id: recipeId,
+        },
+        include: {
+          ingredients: {
+            include: {
+              rawIngredient: true,
+            },
+          },
+        },
+      });
+  
+      if (!recipe) {
+        return res.status(404).json({
+          error: "Recipe not found.",
+        });
+      }
+  
+      let totalCost = 0;
+      const ingredientsArray: RecipeCostIngredient[] = [];
+  
+      for (const ingredient of recipe.ingredients) {
+        const latestPurchaseItem =
+          await prisma.purchaseItem.findFirst({
+            where: {
+              rawIngredientId: ingredient.rawIngredientId,
+            },
+            include: {
+              purchase: true,
+            },
+            orderBy: [
+              {
+                purchase: {
+                  date: "desc",
+                },
+              },
+              {
+                purchase: {
+                  createdAt: "desc",
+                },
+              },
+            ],
+          });
+      
+        if (!latestPurchaseItem) {
+          ingredientsArray.push({
+            rawIngredientId: ingredient.rawIngredientId,
+            name: ingredient.rawIngredient.name,
+            quantity: ingredient.quantity,
+            canonicalUnit: ingredient.rawIngredient.canonicalUnit,
+            pricePerUnit: null,
+            cost: null,
+            latestPurchaseDate: null,
+            purchaseId: null,
+          });
+      
+          continue;
+        }
+      
+        const ingredientCost =
+          Math.round(
+            ingredient.quantity *
+              latestPurchaseItem.pricePerUnit *
+              100
+          ) / 100;
+      
+        totalCost =
+          Math.round((totalCost + ingredientCost) * 100) / 100;
+      
+        ingredientsArray.push({
+          rawIngredientId: ingredient.rawIngredientId,
+          name: ingredient.rawIngredient.name,
+          quantity: ingredient.quantity,
+          canonicalUnit: ingredient.rawIngredient.canonicalUnit,
+          pricePerUnit: latestPurchaseItem.pricePerUnit,
+          cost: ingredientCost,
+          latestPurchaseDate: latestPurchaseItem.purchase.date,
+          purchaseId: latestPurchaseItem.purchase.id,
+        });
+      }
+  
+      const hasMissingCostData = ingredientsArray.some(
+        (ingredient) => ingredient.cost === null
+      );
+  
+      const costPerServing = hasMissingCostData
+      ? null
+      : Math.round(
+          (totalCost / recipe.servings) * 100
         ) / 100;
+      
+      const response = {
+        recipeId: recipe.id,
+        recipeName: recipe.name,
+        servings: recipe.servings,
+        totalCost: hasMissingCostData ? null : totalCost,
+        costPerServing,
+        hasMissingCostData,
+        ingredients: ingredientsArray,
+      };
+  
+      return res.status(200).json(response);
+    } catch (error) {
+        console.error(error);
 
-      totalCost =
-        Math.round((totalCost + ingredientCost) * 100) / 100;
-
-      ingredientsArray.push({
-        rawIngredientId: ingredient.rawIngredientId,
-        name: ingredient.rawIngredient.name,
-        quantity: ingredient.quantity,
-        canonicalUnit:
-          ingredient.rawIngredient.canonicalUnit,
-        pricePerUnit: latestPurchaseItem.pricePerUnit,
-        cost: ingredientCost,
+      return res.status(500).json({
+        error: "Failed to calculate recipe cost.",
       });
     }
-
-    const costPerServing =
-      Math.round(
-        (totalCost / recipe.servings) * 100
-      ) / 100;
-
-    const response = {
-      recipeId: recipe.id,
-      recipeName: recipe.name,
-      servings: recipe.servings,
-      totalCost,
-      costPerServing,
-      ingredients: ingredientsArray,
-    };
-
-    return res.status(200).json(response);
-  },
+  },     
 );
 
 app.post("/api/sales-import/preview", verifyToken, requireRole("Admin", "DeePlace"), upload.single("file"), async (req, res) => {
@@ -2506,6 +2537,17 @@ const getPurchaseEditLock = async (
     purchase,
     locked: false,
   };
+};
+
+type RecipeCostIngredient = {
+  rawIngredientId: string;
+  name: string;
+  quantity: number;
+  canonicalUnit: MeasurementUnit;
+  pricePerUnit: number | null;
+  cost: number | null;
+  latestPurchaseDate: Date | null;
+  purchaseId: string | null;
 };
 
 app.listen(3001, () => {
