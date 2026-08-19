@@ -233,6 +233,63 @@ app.get("/api/suppliers", verifyToken, requireRole("Admin", "Echo"), async (req,
     res.json(suppliers);
 });
 
+app.get(
+  "/api/suppliers/:id/purchases",
+  verifyToken,
+  requireRole("Admin", "Echo"),
+  async (req, res) => {
+    try {
+      const supplierId = req.params.id;
+
+      if (!isNonEmptyString(supplierId)) {
+        return res.status(422).json({
+          error: "Supplier ID must be a non-empty string.",
+        });
+      }
+
+      const supplier = await prisma.supplier.findUnique({
+        where: {
+          id: supplierId,
+        },
+      });
+
+      if (!supplier) {
+        return res.status(404).json({
+          error: "Supplier not found.",
+        });
+      }
+
+      const purchases = await prisma.purchase.findMany({
+        where: {
+          supplierId,
+        },
+        orderBy: {
+          date: "desc",
+        },
+        include: {
+          supplier: true,
+          items: {
+            include: {
+              rawIngredient: true,
+            },
+          },
+        },
+      });
+
+      return res.status(200).json({
+        supplier,
+        purchases,
+      });
+    } catch (error) {
+      console.error(error);
+
+      return res.status(500).json({
+        error: "Failed to load supplier purchase history.",
+      });
+    }
+  },
+);
+
 app.post("/api/suppliers", verifyToken, requireRole("Admin", "Echo"), async (req, res) => {
     const name = req.body.name;
     if (typeof name !== 'string') {
