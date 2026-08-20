@@ -271,6 +271,7 @@ app.get(
           items: {
             include: {
               rawIngredient: true,
+              supplyItem: true,
             },
           },
         },
@@ -329,6 +330,7 @@ app.get(
         items: {
           include: {
             rawIngredient: true,
+            supplyItem: true,
           },
         },
       },
@@ -399,8 +401,13 @@ app.post(
         quantity: number;
         pricePerUnit: number;
         totalPrice: number;
+
         rawIngredientId?: string;
         newIngredientName?: string;
+
+        supplyItemId?: string;
+        newSupplyItemName?: string;
+
         canonicalUnit?: MeasurementUnit;
       }[] = [];
 
@@ -410,33 +417,51 @@ app.post(
         const orderUnits = item.orderUnits;
         const quantity = item.quantity;
         const totalPrice = item.totalPrice;
+
         const rawIngredientId = item.rawIngredientId;
         const newIngredientName = item.newIngredientName;
+
+        const supplyItemId = item.supplyItemId;
+        const newSupplyItemName = item.newSupplyItemName;
+
         const canonicalUnit = item.canonicalUnit;
 
         const hasExistingIngredient =
-
           isNonEmptyString(rawIngredientId);
 
         const hasNewIngredient =
           isNonEmptyString(newIngredientName);
 
-        if (hasExistingIngredient === hasNewIngredient) {
+        const hasExistingSupplyItem =
+          isNonEmptyString(supplyItemId);
+
+        const hasNewSupplyItem =
+          isNonEmptyString(newSupplyItemName);
+
+        const itemTypeCount = [
+          hasExistingIngredient,
+          hasNewIngredient,
+          hasExistingSupplyItem,
+          hasNewSupplyItem,
+        ].filter(Boolean).length;
+
+        if (itemTypeCount !== 1) {
           return res.status(422).json({
             error:
-              "Each purchase item must select an existing ingredient or provide a new ingredient name.",
+              "Each purchase item must reference exactly one existing or new inventory item.",
           });
         }
 
         if (
-          hasNewIngredient &&
+          (hasNewIngredient || hasNewSupplyItem) &&
           (
             !isNonEmptyString(canonicalUnit) ||
             !validUnits.includes(canonicalUnit as MeasurementUnit)
           )
         ) {
           return res.status(422).json({
-            error: "A valid canonical unit is required for new ingredients.",
+            error:
+              "A valid canonical unit is required for new inventory items.",
           });
         }
 
@@ -459,15 +484,28 @@ app.post(
             typeof orderUnits === "string" && orderUnits.trim()
               ? orderUnits.trim()
               : null,
+
           quantity,
           pricePerUnit,
           totalPrice,
+
           ...(hasExistingIngredient && {
             rawIngredientId,
           }),
+        
           ...(hasNewIngredient && {
             newIngredientName:
-              normalizeIngredientName(newIngredientName),
+              normalizeInventoryItemName(newIngredientName),
+            canonicalUnit: canonicalUnit as MeasurementUnit,
+          }),
+        
+          ...(hasExistingSupplyItem && {
+            supplyItemId,
+          }),
+        
+          ...(hasNewSupplyItem && {
+            newSupplyItemName:
+              normalizeInventoryItemName(newSupplyItemName),
             canonicalUnit: canonicalUnit as MeasurementUnit,
           }),
         });
@@ -486,29 +524,34 @@ app.post(
           quantity: number;
           pricePerUnit: number;
           totalPrice: number;
-          rawIngredientId: string;
+
+          rawIngredientId?: string;
+          supplyItemId?: string;
+
           previousQuantity: number;
           newQuantity: number;
         }[] = [];
 
         for (const item of validatedItems) {
-          let rawIngredient;
+          let itemName: string;
+          let rawIngredientId: string | undefined;
+          let supplyItemId: string | undefined;
           let previousQuantity: number;
           let newQuantity: number;
 
           if (item.rawIngredientId) {
-            rawIngredient = await tx.rawIngredient.findUnique({
+            const rawIngredient = await tx.rawIngredient.findUnique({
               where: {
                 id: item.rawIngredientId,
               },
             });
-
+          
             if (!rawIngredient) {
               throw new Error("RAW_INGREDIENT_NOT_FOUND");
             }
-
+          
             previousQuantity = rawIngredient.currentQuantity;
-
+          
             const updatedIngredient = await tx.rawIngredient.update({
               where: {
                 id: rawIngredient.id,
@@ -519,50 +562,120 @@ app.post(
                 },
               },
             });
-
+          
+            itemName = rawIngredient.name;
+            rawIngredientId = rawIngredient.id;
             newQuantity = updatedIngredient.currentQuantity;
-          } else {
-            const normalizedName = item.newIngredientName!;
-
+          } else if (item.newIngredientName) {
+            const normalizedName = item.newIngredientName;
+          
             const existingIngredient =
               await tx.rawIngredient.findUnique({
                 where: {
                   name: normalizedName,
                 },
               });
-
+            
             if (existingIngredient) {
               throw new Error(
                 `DUPLICATE_INGREDIENT:${normalizedName}`,
               );
             }
-
-            previousQuantity = 0;
-
-            const canonicalUnit = item.canonicalUnit;
-
-            if (!canonicalUnit) {
+          
+            if (!item.canonicalUnit) {
               throw new Error("CANONICAL_UNIT_REQUIRED");
             }
-
-            rawIngredient = await tx.rawIngredient.create({
+          
+            const rawIngredient = await tx.rawIngredient.create({
               data: {
                 name: normalizedName,
                 currentQuantity: item.quantity,
-                canonicalUnit,
+                canonicalUnit: item.canonicalUnit,
               },
             });
-
+          
+            itemName = rawIngredient.name;
+            rawIngredientId = rawIngredient.id;
+            previousQuantity = 0;
             newQuantity = rawIngredient.currentQuantity;
+          } else if (item.supplyItemId) {
+            const supplyItem = await tx.supplyItem.findUnique({
+              where: {
+                id: item.supplyItemId,
+              },
+            });
+          
+            if (!supplyItem) {
+              throw new Error("SUPPLY_ITEM_NOT_FOUND");
+            }
+          
+            previousQuantity = supplyItem.currentQuantity;
+          
+            const updatedSupplyItem = await tx.supplyItem.update({
+              where: {
+                id: supplyItem.id,
+              },
+              data: {
+                currentQuantity: {
+                  increment: item.quantity,
+                },
+              },
+            });
+          
+            itemName = supplyItem.name;
+            supplyItemId = supplyItem.id;
+            newQuantity = updatedSupplyItem.currentQuantity;
+          } else if (item.newSupplyItemName) {
+            const normalizedName = item.newSupplyItemName;
+          
+            const existingSupplyItem =
+              await tx.supplyItem.findUnique({
+                where: {
+                  name: normalizedName,
+                },
+              });
+            
+            if (existingSupplyItem) {
+              throw new Error(
+                `DUPLICATE_SUPPLY_ITEM:${normalizedName}`,
+              );
+            }
+          
+            if (!item.canonicalUnit) {
+              throw new Error("CANONICAL_UNIT_REQUIRED");
+            }
+          
+            const supplyItem = await tx.supplyItem.create({
+              data: {
+                name: normalizedName,
+                currentQuantity: item.quantity,
+                canonicalUnit: item.canonicalUnit,
+              },
+            });
+          
+            itemName = supplyItem.name;
+            supplyItemId = supplyItem.id;
+            previousQuantity = 0;
+            newQuantity = supplyItem.currentQuantity;
+          } else {
+            throw new Error("INVALID_PURCHASE_ITEM");
           }
-
+        
           resolvedItems.push({
-            itemName: rawIngredient.name,
+            itemName,
             orderUnits: item.orderUnits,
             quantity: item.quantity,
             pricePerUnit: item.pricePerUnit,
             totalPrice: item.totalPrice,
-            rawIngredientId: rawIngredient.id,
+          
+            ...(rawIngredientId && {
+              rawIngredientId,
+            }),
+          
+            ...(supplyItemId && {
+              supplyItemId,
+            }),
+          
             previousQuantity,
             newQuantity,
           });
@@ -585,7 +698,8 @@ app.post(
                 pricePerUnit: item.pricePerUnit,
 
                 totalPrice: item.totalPrice,
-                rawIngredientId: item.rawIngredientId,
+                rawIngredientId: item.rawIngredientId ?? null,
+                supplyItemId: item.supplyItemId ?? null,
               })),
             },
           },
@@ -594,6 +708,7 @@ app.post(
             items: {
               include: {
                 rawIngredient: true,
+                supplyItem: true,
               },
             },
           },
@@ -602,7 +717,8 @@ app.post(
         for (const item of resolvedItems) {
           await tx.inventoryTransaction.create({
             data: {
-              rawIngredientId: item.rawIngredientId,
+              rawIngredientId: item.rawIngredientId ?? null,
+              supplyItemId: item.supplyItemId ?? null,
               type: "PURCHASE",
               quantityChange: item.quantity,
               previousQuantity: item.previousQuantity,
@@ -644,7 +760,27 @@ app.post(
         error.message === "CANONICAL_UNIT_REQUIRED"
       ) {
         return res.status(422).json({
-          error: "A canonical unit is required for new ingredients.",
+          error: "A canonical unit is required for new inventory items.",
+        });
+      }
+
+      if (
+        error instanceof Error &&
+        error.message === "SUPPLY_ITEM_NOT_FOUND"
+      ) {
+        return res.status(404).json({
+          error: "Supply item not found.",
+        });
+      }
+
+      if (
+        error instanceof Error &&
+        error.message.startsWith("DUPLICATE_SUPPLY_ITEM:")
+      ) {
+        const supplyItemName = error.message.split(":")[1];
+      
+        return res.status(409).json({
+          error: `Supply item "${supplyItemName}" already exists. Select the existing supply item instead.`,
         });
       }
 
@@ -741,25 +877,72 @@ app.patch(
         });
       }
 
+      const validUnits = Object.values(MeasurementUnit);
+
       const validatedItems: {
-        rawIngredientId: string;
+        rawIngredientId?: string;
+        newIngredientName?: string;
+        supplyItemId?: string;
+        newSupplyItemName?: string;
+        canonicalUnit?: MeasurementUnit;
         orderUnits: string | null;
         quantity: number;
         pricePerUnit: number;
         totalPrice: number;
       }[] = [];
-      
+
       let purchaseSubtotal = 0;
       
       for (const item of items) {
         const rawIngredientId = item.rawIngredientId;
+        const newIngredientName = item.newIngredientName;
+
+        const supplyItemId = item.supplyItemId;
+        const newSupplyItemName = item.newSupplyItemName;
+
+        const canonicalUnit = item.canonicalUnit;
         const orderUnits = item.orderUnits;
         const quantity = item.quantity;
         const totalPrice = item.totalPrice;
-      
-        if (!isNonEmptyString(rawIngredientId)) {
+
+        const hasExistingIngredient =
+          isNonEmptyString(rawIngredientId);
+
+        const hasNewIngredient =
+          isNonEmptyString(newIngredientName);
+
+        const hasExistingSupplyItem =
+          isNonEmptyString(supplyItemId);
+
+        const hasNewSupplyItem =
+          isNonEmptyString(newSupplyItemName);
+
+        const itemTypeCount = [
+          hasExistingIngredient,
+          hasNewIngredient,
+          hasExistingSupplyItem,
+          hasNewSupplyItem,
+        ].filter(Boolean).length;
+
+        if (itemTypeCount !== 1) {
           return res.status(422).json({
-            error: "Each item must reference an existing raw ingredient.",
+            error:
+              "Each item must reference exactly one existing or new inventory item.",
+          });
+        }
+
+        if (
+          (hasNewIngredient || hasNewSupplyItem) &&
+          (
+            !isNonEmptyString(canonicalUnit) ||
+            !validUnits.includes(
+              canonicalUnit as MeasurementUnit
+            )
+          )
+        ) {
+          return res.status(422).json({
+            error:
+              "A valid canonical unit is required for new inventory items.",
           });
         }
     
@@ -775,27 +958,68 @@ app.patch(
           });
         }
     
-        const rawIngredient = await prisma.rawIngredient.findUnique({
-          where: {
-            id: rawIngredientId,
-          },
-        });
-    
-        if (!rawIngredient) {
-          return res.status(404).json({
-            error: "Raw ingredient not found.",
-          });
+        if (hasExistingIngredient) {
+          const rawIngredient =
+            await prisma.rawIngredient.findUnique({
+              where: {
+                id: rawIngredientId,
+              },
+            });
+          
+          if (!rawIngredient) {
+            return res.status(404).json({
+              error: "Raw ingredient not found.",
+            });
+          }
+        }
+
+        if (hasExistingSupplyItem) {
+          const supplyItem =
+            await prisma.supplyItem.findUnique({
+              where: {
+                id: supplyItemId,
+              },
+            });
+          
+          if (!supplyItem) {
+            return res.status(404).json({
+              error: "Supply item not found.",
+            });
+          }
         }
     
         const pricePerUnit =
           Math.round((totalPrice / quantity) * 100) / 100;
     
         validatedItems.push({
-          rawIngredientId,
+          ...(hasExistingIngredient && {
+            rawIngredientId,
+          }),
+        
+          ...(hasNewIngredient && {
+            newIngredientName:
+              normalizeInventoryItemName(newIngredientName),
+            canonicalUnit:
+              canonicalUnit as MeasurementUnit,
+          }),
+        
+          ...(hasExistingSupplyItem && {
+            supplyItemId,
+          }),
+        
+          ...(hasNewSupplyItem && {
+            newSupplyItemName:
+              normalizeInventoryItemName(newSupplyItemName),
+            canonicalUnit:
+              canonicalUnit as MeasurementUnit,
+          }),
+        
           orderUnits:
-            typeof orderUnits === "string" && orderUnits.trim()
+            typeof orderUnits === "string" &&
+            orderUnits.trim()
               ? orderUnits.trim()
               : null,
+        
           quantity,
           pricePerUnit,
           totalPrice,
@@ -810,16 +1034,31 @@ app.patch(
     
       const purchaseTotal = Math.round((subtotal + taxAmount) * 100) / 100;
 
-      const rawIngredientIds = validatedItems.map(
-        (item) => item.rawIngredientId,
+      const inventoryItemKeys = validatedItems.map(
+        (item) => {
+          if (item.rawIngredientId) {
+            return `raw:${item.rawIngredientId}`;
+          }
+        
+          if (item.newIngredientName) {
+            return `raw-name:${item.newIngredientName}`;
+          }
+        
+          if (item.supplyItemId) {
+            return `supply:${item.supplyItemId}`;
+          }
+        
+          return `supply-name:${item.newSupplyItemName}`;
+        }
       );
-      
+
       if (
-        new Set(rawIngredientIds).size !== rawIngredientIds.length
+        new Set(inventoryItemKeys).size !==
+        inventoryItemKeys.length
       ) {
         return res.status(422).json({
           error:
-            "The same raw ingredient cannot appear more than once in a purchase.",
+            "The same inventory item cannot appear more than once in a purchase.",
         });
       }
 
@@ -839,36 +1078,68 @@ app.patch(
 
       // Reverse original purchase inventory effects
       for (const item of existingPurchase.items) {
-        if (!item.rawIngredientId) {
+        const hasRawIngredient = !!item.rawIngredientId;
+        const hasSupplyItem = !!item.supplyItemId;
+      
+        if (hasRawIngredient === hasSupplyItem) {
           throw new Error("PURCHASE_ITEM_NOT_LINKED");
         }
-
-        const rawIngredient = await tx.rawIngredient.findUnique({
-          where: {
-            id: item.rawIngredientId,
-          },
-        });
-
-        if (!rawIngredient) {
-          throw new Error("RAW_INGREDIENT_NOT_FOUND");
-        }
-
-        if (rawIngredient.currentQuantity < item.quantity) {
-          throw new Error(
-            `INSUFFICIENT_INVENTORY_TO_REVERSE:${rawIngredient.name}`,
-          );
-        }
-
-        await tx.rawIngredient.update({
-          where: {
-            id: rawIngredient.id,
-          },
-          data: {
-            currentQuantity: {
-              decrement: item.quantity,
+      
+        if (item.rawIngredientId) {
+          const rawIngredient = await tx.rawIngredient.findUnique({
+            where: {
+              id: item.rawIngredientId,
             },
-          },
-        });
+          });
+        
+          if (!rawIngredient) {
+            throw new Error("RAW_INGREDIENT_NOT_FOUND");
+          }
+        
+          if (rawIngredient.currentQuantity < item.quantity) {
+            throw new Error(
+              `INSUFFICIENT_INVENTORY_TO_REVERSE:${rawIngredient.name}`,
+            );
+          }
+        
+          await tx.rawIngredient.update({
+            where: {
+              id: rawIngredient.id,
+            },
+            data: {
+              currentQuantity: {
+                decrement: item.quantity,
+              },
+            },
+          });
+        } else if (item.supplyItemId) {
+          const supplyItem = await tx.supplyItem.findUnique({
+            where: {
+              id: item.supplyItemId,
+            },
+          });
+        
+          if (!supplyItem) {
+            throw new Error("SUPPLY_ITEM_NOT_FOUND");
+          }
+        
+          if (supplyItem.currentQuantity < item.quantity) {
+            throw new Error(
+              `INSUFFICIENT_INVENTORY_TO_REVERSE:${supplyItem.name}`,
+            );
+          }
+        
+          await tx.supplyItem.update({
+            where: {
+              id: supplyItem.id,
+            },
+            data: {
+              currentQuantity: {
+                decrement: item.quantity,
+              },
+            },
+          });
+        }
       }
 
       // Remove old purchase ledger entries
@@ -892,45 +1163,169 @@ app.patch(
         quantity: number;
         pricePerUnit: number;
         totalPrice: number;
-        rawIngredientId: string;
+        rawIngredientId?: string;
+        supplyItemId?: string;
         previousQuantity: number;
         newQuantity: number;
       }[] = [];
 
       // Apply corrected inventory
       for (const item of validatedItems) {
-        const rawIngredient = await tx.rawIngredient.findUnique({
-          where: {
-            id: item.rawIngredientId,
-          },
-        });
-
-        if (!rawIngredient) {
-          throw new Error("RAW_INGREDIENT_NOT_FOUND");
-        }
-
-        const previousQuantity = rawIngredient.currentQuantity;
-
-        const updatedIngredient = await tx.rawIngredient.update({
-          where: {
-            id: rawIngredient.id,
-          },
-          data: {
-            currentQuantity: {
-              increment: item.quantity,
+        let itemName: string;
+        let rawIngredientId: string | undefined;
+        let supplyItemId: string | undefined;
+        let previousQuantity: number;
+        let newQuantity: number;
+      
+        if (item.rawIngredientId) {
+          const rawIngredient = await tx.rawIngredient.findUnique({
+            where: {
+              id: item.rawIngredientId,
             },
-          },
-        });
+          });
+        
+          if (!rawIngredient) {
+            throw new Error("RAW_INGREDIENT_NOT_FOUND");
+          }
+        
+          previousQuantity = rawIngredient.currentQuantity;
+        
+          const updatedIngredient = await tx.rawIngredient.update({
+            where: {
+              id: rawIngredient.id,
+            },
+            data: {
+              currentQuantity: {
+                increment: item.quantity,
+              },
+            },
+          });
+        
+          itemName = rawIngredient.name;
+          rawIngredientId = rawIngredient.id;
+          newQuantity = updatedIngredient.currentQuantity;
+        } else if (item.newIngredientName) {
+          const normalizedName =
+            item.newIngredientName;
 
+          const existingIngredient =
+            await tx.rawIngredient.findUnique({
+              where: {
+                name: normalizedName,
+              },
+            });
+          
+          if (existingIngredient) {
+            throw new Error(
+              `DUPLICATE_INGREDIENT:${normalizedName}`
+            );
+          }
+        
+          if (!item.canonicalUnit) {
+            throw new Error(
+              "CANONICAL_UNIT_REQUIRED"
+            );
+          }
+        
+          const rawIngredient =
+            await tx.rawIngredient.create({
+              data: {
+                name: normalizedName,
+                currentQuantity: item.quantity,
+                canonicalUnit: item.canonicalUnit,
+              },
+            });
+          
+          itemName = rawIngredient.name;
+          rawIngredientId = rawIngredient.id;
+          previousQuantity = 0;
+          newQuantity =
+            rawIngredient.currentQuantity;
+        } else if (item.supplyItemId) {
+          const supplyItem = await tx.supplyItem.findUnique({
+            where: {
+              id: item.supplyItemId,
+            },
+          });
+        
+          if (!supplyItem) {
+            throw new Error("SUPPLY_ITEM_NOT_FOUND");
+          }
+        
+          previousQuantity = supplyItem.currentQuantity;
+        
+          const updatedSupplyItem = await tx.supplyItem.update({
+            where: {
+              id: supplyItem.id,
+            },
+            data: {
+              currentQuantity: {
+                increment: item.quantity,
+              },
+            },
+          });
+        
+          itemName = supplyItem.name;
+          supplyItemId = supplyItem.id;
+          newQuantity = updatedSupplyItem.currentQuantity;
+        } else if (item.newSupplyItemName) {
+          const normalizedName =
+            item.newSupplyItemName;
+
+          const existingSupplyItem =
+            await tx.supplyItem.findUnique({
+              where: {
+                name: normalizedName,
+              },
+            });
+          
+          if (existingSupplyItem) {
+            throw new Error(
+              `DUPLICATE_SUPPLY_ITEM:${normalizedName}`
+            );
+          }
+        
+          if (!item.canonicalUnit) {
+            throw new Error(
+              "CANONICAL_UNIT_REQUIRED"
+            );
+          }
+        
+          const supplyItem =
+            await tx.supplyItem.create({
+              data: {
+                name: normalizedName,
+                currentQuantity: item.quantity,
+                canonicalUnit: item.canonicalUnit,
+              },
+            });
+          
+          itemName = supplyItem.name;
+          supplyItemId = supplyItem.id;
+          previousQuantity = 0;
+          newQuantity =
+            supplyItem.currentQuantity;
+        } else {
+          throw new Error("PURCHASE_ITEM_NOT_LINKED");
+        }
+      
         resolvedItems.push({
-          itemName: rawIngredient.name,
+          itemName,
           orderUnits: item.orderUnits,
           quantity: item.quantity,
           pricePerUnit: item.pricePerUnit,
           totalPrice: item.totalPrice,
-          rawIngredientId: rawIngredient.id,
+        
+          ...(rawIngredientId && {
+            rawIngredientId,
+          }),
+        
+          ...(supplyItemId && {
+            supplyItemId,
+          }),
+        
           previousQuantity,
-          newQuantity: updatedIngredient.currentQuantity,
+          newQuantity,
         });
       }
 
@@ -952,7 +1347,8 @@ app.patch(
               quantity: item.quantity,
               pricePerUnit: item.pricePerUnit,
               totalPrice: item.totalPrice,
-              rawIngredientId: item.rawIngredientId,
+              rawIngredientId: item.rawIngredientId ?? null,
+              supplyItemId: item.supplyItemId ?? null,
             })),
           },
         },
@@ -961,6 +1357,7 @@ app.patch(
           items: {
             include: {
               rawIngredient: true,
+              supplyItem: true,
             },
           },
         },
@@ -969,7 +1366,8 @@ app.patch(
       for (const item of resolvedItems) {
         await tx.inventoryTransaction.create({
           data: {
-            rawIngredientId: item.rawIngredientId,
+            rawIngredientId: item.rawIngredientId ?? null,
+            supplyItemId: item.supplyItemId ?? null,
             type: "PURCHASE",
             quantityChange: item.quantity,
             previousQuantity: item.previousQuantity,
@@ -1003,7 +1401,7 @@ app.patch(
       ) {
         return res.status(409).json({
           error:
-            "Purchase cannot be edited because one or more original items are not linked to a raw ingredient.",
+            "Purchase cannot be edited because one or more original items are not linked to an inventory item.",
         });
       }
       
@@ -1013,6 +1411,15 @@ app.patch(
       ) {
         return res.status(404).json({
           error: "Raw ingredient not found.",
+        });
+      }
+
+      if (
+        error instanceof Error &&
+        error.message === "SUPPLY_ITEM_NOT_FOUND"
+      ) {
+        return res.status(404).json({
+          error: "Supply item not found.",
         });
       }
       
@@ -1026,6 +1433,44 @@ app.patch(
       
         return res.status(409).json({
           error: `Purchase cannot be edited because inventory for ${ingredientName} has already been consumed or transferred.`,
+        });
+      }
+
+      if (
+        error instanceof Error &&
+        error.message.startsWith(
+          "DUPLICATE_INGREDIENT:"
+        )
+      ) {
+        const ingredientName =
+          error.message.split(":")[1];
+      
+        return res.status(409).json({
+          error: `Ingredient "${ingredientName}" already exists. Select the existing ingredient instead.`,
+        });
+      }
+      
+      if (
+        error instanceof Error &&
+        error.message.startsWith(
+          "DUPLICATE_SUPPLY_ITEM:"
+        )
+      ) {
+        const supplyItemName =
+          error.message.split(":")[1];
+      
+        return res.status(409).json({
+          error: `Supply item "${supplyItemName}" already exists. Select the existing supply item instead.`,
+        });
+      }
+      
+      if (
+        error instanceof Error &&
+        error.message === "CANONICAL_UNIT_REQUIRED"
+      ) {
+        return res.status(422).json({
+          error:
+            "A canonical unit is required for new inventory items.",
         });
       }
 
@@ -1128,7 +1573,7 @@ app.post("/api/raw-ingredients", verifyToken, requireRole("Admin", "Echo"), asyn
       });
     }
 
-    const trimmedName = normalizeIngredientName(name);
+    const trimmedName = normalizeInventoryItemName(name);
     const existingName = await prisma.rawIngredient.findUnique({
         where: { name: trimmedName },
     });
@@ -2429,6 +2874,90 @@ app.post(
   }
 );
 
+app.get("/api/supply-items", verifyToken, requireRole("Admin", "Echo"), async (req, res) => {
+    try {
+        const supplies = await prisma.supplyItem.findMany({
+            orderBy: { createdAt: "desc"}
+        });
+
+        return res.status(200).json(supplies);
+    } catch (error) {
+        console.error(error);
+
+        return res.status(500).json({
+            error: "Failed to load supply items.",
+        });
+    }
+});
+
+app.post(
+  "/api/supply-items",
+  verifyToken,
+  requireRole("Admin", "Echo"),
+  async (req, res) => {
+    try {
+      const name = req.body.name;
+      const currentQuantity = req.body.currentQuantity;
+      const canonicalUnit = req.body.canonicalUnit;
+
+      if (!isNonEmptyString(name)) {
+        return res.status(422).json({
+          error: "Supply item name must be a non-empty string.",
+        });
+      }
+
+      if (!isNonNegativeNumber(currentQuantity)) {
+        return res.status(422).json({
+          error: "Quantity must be a non-negative number.",
+        });
+      }
+
+      const validUnits = Object.values(MeasurementUnit);
+
+      if (
+        !isNonEmptyString(canonicalUnit) ||
+        !validUnits.includes(canonicalUnit as MeasurementUnit)
+      ) {
+        return res.status(422).json({
+          error: "Canonical unit is invalid.",
+        });
+      }
+
+      const normalizedName = normalizeInventoryItemName(name);
+
+      const existingSupplyItem =
+        await prisma.supplyItem.findUnique({
+          where: {
+            name: normalizedName,
+          },
+        });
+
+      if (existingSupplyItem) {
+        return res.status(409).json({
+          error: "Supply item already exists.",
+        });
+      }
+
+      const supplyItem = await prisma.supplyItem.create({
+        data: {
+          name: normalizedName,
+          currentQuantity,
+          canonicalUnit:
+            canonicalUnit as MeasurementUnit,
+        },
+      });
+
+      return res.status(201).json(supplyItem);
+    } catch (error) {
+      console.error(error);
+
+      return res.status(500).json({
+        error: "Failed to create supply item.",
+      });
+    }
+  },
+);
+
 function isNonEmptyString(value: unknown): boolean {
     if (typeof value === 'string') {
         const trimmedName = value.trim();
@@ -2462,7 +2991,7 @@ function isNonNegativeNumber(num: unknown): boolean {
     return false;
 }
 
-function normalizeIngredientName(name: string) {
+function normalizeInventoryItemName(name: string) {
     return name.trim().toLowerCase();
 }
 
@@ -2485,17 +3014,6 @@ const getPurchaseEditLock = async (
     };
   }
 
-  const ingredientIds = purchase.items
-    .map((item) => item.rawIngredientId)
-    .filter((id): id is string => id !== null);
-
-  if (ingredientIds.length === 0) {
-    return {
-      purchase,
-      locked: false,
-    };
-  }
-
   const purchaseTransactions =
     await prisma.inventoryTransaction.findMany({
       where: {
@@ -2512,10 +3030,30 @@ const getPurchaseEditLock = async (
   }
 
   for (const transaction of purchaseTransactions) {
+    const hasRawIngredient = !!transaction.rawIngredientId;
+    const hasSupplyItem = !!transaction.supplyItemId;
+
+    if (hasRawIngredient === hasSupplyItem) {
+      return {
+        purchase,
+        locked: true,
+      };
+    }
+
     const laterTransaction =
       await prisma.inventoryTransaction.findFirst({
         where: {
-          rawIngredientId: transaction.rawIngredientId,
+          purchaseId: {
+            not: purchaseId,
+          },
+          ...(transaction.rawIngredientId && {
+            rawIngredientId:
+              transaction.rawIngredientId,
+          }),
+          ...(transaction.supplyItemId && {
+            supplyItemId:
+              transaction.supplyItemId,
+          }),
           createdAt: {
             gt: transaction.createdAt,
           },

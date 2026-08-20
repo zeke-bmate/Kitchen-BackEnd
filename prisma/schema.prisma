@@ -28,16 +28,20 @@ model Purchase {
 }
 
 model PurchaseItem {
-  id              String         @id @default(cuid())
+  id              String   @id @default(cuid())
   purchaseId      String
   itemName        String
   orderUnits      String?
   quantity        Float
   pricePerUnit    Float
   totalPrice      Float
-  purchase        Purchase       @relation(fields: [purchaseId], references: [id])
+
   rawIngredientId String?
+  supplyItemId    String?
+
+  purchase        Purchase @relation(fields: [purchaseId], references: [id])
   rawIngredient   RawIngredient? @relation(fields: [rawIngredientId], references: [id])
+  supplyItem      SupplyItem? @relation(fields: [supplyItemId], references: [id])
 }
 
 enum MeasurementUnit {
@@ -46,6 +50,11 @@ enum MeasurementUnit {
   EACH
   BUNCH
   HEAD
+  BOX
+  CASE
+  PACK
+  ROLL
+  BOTTLE
 }
 
 model RawIngredient {
@@ -203,21 +212,28 @@ enum InventoryTransactionType {
 
 model InventoryTransaction {
   id                  String                   @id @default(cuid())
-  rawIngredientId     String
+
+  rawIngredientId     String?
+  supplyItemId         String?
+
   type                InventoryTransactionType
   quantityChange      Float
   previousQuantity    Float
   newQuantity         Float
   reason              String?
+
   purchaseId          String?
   productionBatchId   String?
   inventoryTransferId String?
+
   createdAt           DateTime                 @default(now())
 
-  rawIngredient       RawIngredient            @relation(fields: [rawIngredientId], references: [id])
-  purchase            Purchase?                @relation(fields: [purchaseId], references: [id])
-  productionBatch     ProductionBatch?         @relation(fields: [productionBatchId], references: [id])
-  inventoryTransfer   InventoryTransfer?        @relation(fields: [inventoryTransferId], references: [id])
+  rawIngredient       RawIngredient?           @relation(fields: [rawIngredientId], references: [id])
+  supplyItem           SupplyItem?              @relation(fields: [supplyItemId], references: [id])
+
+  purchase             Purchase?                @relation(fields: [purchaseId], references: [id])
+  productionBatch      ProductionBatch?         @relation(fields: [productionBatchId], references: [id])
+  inventoryTransfer    InventoryTransfer?       @relation(fields: [inventoryTransferId], references: [id])
 }
 
 enum Location {
@@ -244,4 +260,15 @@ model InventoryTransferItem {
 
   transfer        InventoryTransfer @relation(fields: [transferId], references: [id], onDelete: Cascade)
   rawIngredient   RawIngredient     @relation(fields: [rawIngredientId], references: [id])
+}
+
+model SupplyItem {
+  id                    String                 @id @default(cuid())
+  name                  String                 @unique
+  currentQuantity       Float
+  canonicalUnit         MeasurementUnit
+  createdAt             DateTime               @default(now())
+
+  purchaseItems         PurchaseItem[]
+  inventoryTransactions InventoryTransaction[]
 }
