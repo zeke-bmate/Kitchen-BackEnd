@@ -98,7 +98,7 @@ app.post("/api/login", async (req, res) => {
       role: user.role.name,
      },
     process.env.JWT_SECRET,
-    { expiresIn: "15min" },
+    { expiresIn: "8h" },
   );
 
   return res.json({ token });
@@ -324,22 +324,30 @@ app.get(
   verifyToken,
   requireRole("Admin", "Echo"),
   async (req, res) => {
-    const purchases = await prisma.purchase.findMany({
-      include: {
-        supplier: true,
-        items: {
-          include: {
-            rawIngredient: true,
-            supplyItem: true,
+    try {
+      const purchases = await prisma.purchase.findMany({
+        include: {
+          supplier: true,
+          items: {
+            include: {
+              rawIngredient: true,
+              supplyItem: true,
+            },
           },
         },
-      },
-      orderBy: {
-        createdAt: "desc",
-      },
-    });
+        orderBy: {
+          createdAt: "desc",
+        },
+      });
 
-    res.json(purchases);
+      return res.status(200).json(purchases);
+    } catch (error) {
+      console.error(error);
+
+      return res.status(500).json({
+        error: "Failed to load purchases.",
+      });
+    }
   },
 );
 
@@ -352,7 +360,6 @@ app.post(
       const items = req.body.items;
       const date = req.body.date;
       const supplierId = req.body.supplierId;
-      const taxRate = req.body.taxRate;
 
       if (!Array.isArray(items) || items.length === 0) {
         return res.status(422).json({
@@ -372,18 +379,6 @@ app.post(
         });
       }
 
-      const taxRateNum = taxRate === undefined || taxRate === null || taxRate === ""   ? 0   : Number(taxRate);
-
-      if (
-        Number.isNaN(taxRateNum) ||
-        taxRateNum < 0 ||
-        taxRateNum > 100
-      ) {
-        return res.status(422).json({
-          error: "Tax rate must be between 0 and 100.",
-        });
-      }
-
       const existingSupplier = await prisma.supplier.findUnique({
         where: { id: supplierId },
       });
@@ -399,24 +394,31 @@ app.post(
       const validatedItems: {
         orderUnits: string | null;
         quantity: number;
+      
         pricePerUnit: number;
+        subtotal: number;
+        taxRate: number;
+        taxAmount: number;
         totalPrice: number;
-
+      
         rawIngredientId?: string;
         newIngredientName?: string;
-
+      
         supplyItemId?: string;
         newSupplyItemName?: string;
-
+      
         canonicalUnit?: MeasurementUnit;
       }[] = [];
 
       let purchaseSubtotal = 0;
+      let purchaseTaxAmount = 0;
+      let purchaseTotal = 0;
 
       for (const item of items) {
         const orderUnits = item.orderUnits;
         const quantity = item.quantity;
-        const totalPrice = item.totalPrice;
+        const subtotal = item.subtotal;
+        const taxRate = item.taxRate;
 
         const rawIngredientId = item.rawIngredientId;
         const newIngredientName = item.newIngredientName;
@@ -471,13 +473,35 @@ app.post(
           });
         }
 
-        if (!isPositiveNumber(totalPrice)) {
+        if (!isPositiveNumber(subtotal)) {
           return res.status(422).json({
-            error: "Total price must be greater than zero.",
+            error: "Subtotal must be greater than zero.",
           });
         }
 
-        const pricePerUnit = Math.round((totalPrice / quantity) * 100) / 100;
+        const taxRateNum =
+          taxRate === undefined || taxRate === null || taxRate === ""
+            ? 0
+            : Number(taxRate);
+
+        if (
+          Number.isNaN(taxRateNum) ||
+          taxRateNum < 0 ||
+          taxRateNum > 100
+        ) {
+          return res.status(422).json({
+            error: "Tax rate must be between 0 and 100.",
+          });
+        }
+
+        const pricePerUnit =
+          Math.round((subtotal / quantity) * 100) / 100;
+
+        const taxAmount =
+          Math.round(subtotal * (taxRateNum / 100) * 100) / 100;
+
+        const totalPrice =
+          Math.round((subtotal + taxAmount) * 100) / 100;
 
         validatedItems.push({
           orderUnits:
@@ -487,6 +511,9 @@ app.post(
 
           quantity,
           pricePerUnit,
+          subtotal,
+          taxRate: taxRateNum,
+          taxAmount,
           totalPrice,
 
           ...(hasExistingIngredient && {
@@ -510,19 +537,30 @@ app.post(
           }),
         });
 
-        purchaseSubtotal += totalPrice;
+        purchaseSubtotal += subtotal;
+        purchaseTaxAmount += taxAmount;
+        purchaseTotal += totalPrice;
       }
 
-      const subtotal = Math.round(purchaseSubtotal * 100) / 100;
-      const taxAmount = Math.round(subtotal * (taxRateNum / 100) * 100) / 100;
-      const purchaseTotal = Math.round((subtotal + taxAmount) * 100) / 100;
+      const subtotal =
+        Math.round(purchaseSubtotal * 100) / 100;
+
+      const taxAmount =
+        Math.round(purchaseTaxAmount * 100) / 100;
+
+      const totalPrice =
+        Math.round(purchaseTotal * 100) / 100;
 
       const result = await prisma.$transaction(async (tx) => {
         const resolvedItems: {
           itemName: string;
           orderUnits: string | null;
           quantity: number;
+
           pricePerUnit: number;
+          subtotal: number;
+          taxRate: number;
+          taxAmount: number;
           totalPrice: number;
 
           rawIngredientId?: string;
@@ -665,9 +703,13 @@ app.post(
             itemName,
             orderUnits: item.orderUnits,
             quantity: item.quantity,
+
             pricePerUnit: item.pricePerUnit,
+            subtotal: item.subtotal,
+            taxRate: item.taxRate,
+            taxAmount: item.taxAmount,
             totalPrice: item.totalPrice,
-          
+
             ...(rawIngredientId && {
               rawIngredientId,
             }),
@@ -686,18 +728,20 @@ app.post(
             date: new Date(`${date}T12:00:00`),
             supplierId,
             subtotal,
-            taxRate: taxRateNum,
             taxAmount,
-            totalPrice: purchaseTotal,
+            totalPrice,
             items: {
               create: resolvedItems.map((item) => ({
                 itemName: item.itemName,
                 orderUnits: item.orderUnits,
-
                 quantity: item.quantity,
+              
                 pricePerUnit: item.pricePerUnit,
-
+                subtotal: item.subtotal,
+                taxRate: item.taxRate,
+                taxAmount: item.taxAmount,
                 totalPrice: item.totalPrice,
+              
                 rawIngredientId: item.rawIngredientId ?? null,
                 supplyItemId: item.supplyItemId ?? null,
               })),
@@ -827,7 +871,6 @@ app.patch(
       const date = req.body.date;
       const supplierId = req.body.supplierId;
       const reason = req.body.reason;
-      const taxRate = req.body.taxRate;
 
       if (!Array.isArray(items) || items.length === 0) {
         return res.status(422).json({
@@ -853,18 +896,6 @@ app.patch(
         });
       }
 
-      const taxRateNum = taxRate === undefined || taxRate === null || taxRate === ""   ? 0   : Number(taxRate);
-
-      if (
-        Number.isNaN(taxRateNum) ||
-        taxRateNum < 0 ||
-        taxRateNum > 100
-      ) {
-        return res.status(422).json({
-          error: "Tax rate must be between 0 and 100.",
-        });
-      }
-
       const existingSupplier = await prisma.supplier.findUnique({
         where: {
           id: supplierId,
@@ -882,16 +913,25 @@ app.patch(
       const validatedItems: {
         rawIngredientId?: string;
         newIngredientName?: string;
+      
         supplyItemId?: string;
         newSupplyItemName?: string;
+      
         canonicalUnit?: MeasurementUnit;
+      
         orderUnits: string | null;
         quantity: number;
+      
         pricePerUnit: number;
+        subtotal: number;
+        taxRate: number;
+        taxAmount: number;
         totalPrice: number;
       }[] = [];
 
       let purchaseSubtotal = 0;
+      let purchaseTaxAmount = 0;
+      let purchaseTotal = 0;
       
       for (const item of items) {
         const rawIngredientId = item.rawIngredientId;
@@ -903,7 +943,8 @@ app.patch(
         const canonicalUnit = item.canonicalUnit;
         const orderUnits = item.orderUnits;
         const quantity = item.quantity;
-        const totalPrice = item.totalPrice;
+        const subtotal = item.subtotal;
+        const taxRate = item.taxRate;
 
         const hasExistingIngredient =
           isNonEmptyString(rawIngredientId);
@@ -952,9 +993,24 @@ app.patch(
           });
         }
     
-        if (!isPositiveNumber(totalPrice)) {
+        if (!isPositiveNumber(subtotal)) {
           return res.status(422).json({
-            error: "Total price must be greater than zero.",
+            error: "Subtotal must be greater than zero.",
+          });
+        }
+
+        const taxRateNum =
+          taxRate === undefined || taxRate === null || taxRate === ""
+            ? 0
+            : Number(taxRate);
+
+        if (
+          Number.isNaN(taxRateNum) ||
+          taxRateNum < 0 ||
+          taxRateNum > 100
+        ) {
+          return res.status(422).json({
+            error: "Tax rate must be between 0 and 100.",
           });
         }
     
@@ -989,7 +1045,13 @@ app.patch(
         }
     
         const pricePerUnit =
-          Math.round((totalPrice / quantity) * 100) / 100;
+          Math.round((subtotal / quantity) * 100) / 100;
+
+        const taxAmount =
+          Math.round(subtotal * (taxRateNum / 100) * 100) / 100;
+
+        const totalPrice =
+          Math.round((subtotal + taxAmount) * 100) / 100;
     
         validatedItems.push({
           ...(hasExistingIngredient && {
@@ -1022,17 +1084,25 @@ app.patch(
         
           quantity,
           pricePerUnit,
+          subtotal,
+          taxRate: taxRateNum,
+          taxAmount,
           totalPrice,
         });
     
-        purchaseSubtotal += totalPrice;
+        purchaseSubtotal += subtotal;
+        purchaseTaxAmount += taxAmount;
+        purchaseTotal += totalPrice;
       }
 
-      const subtotal = Math.round(purchaseSubtotal * 100) / 100;
-        
-      const taxAmount = Math.round(subtotal * (taxRateNum / 100) * 100) / 100;
-    
-      const purchaseTotal = Math.round((subtotal + taxAmount) * 100) / 100;
+      const subtotal =
+        Math.round(purchaseSubtotal * 100) / 100;
+
+      const taxAmount =
+        Math.round(purchaseTaxAmount * 100) / 100;
+
+      const totalPrice =
+        Math.round(purchaseTotal * 100) / 100;
 
       const inventoryItemKeys = validatedItems.map(
         (item) => {
@@ -1161,10 +1231,16 @@ app.patch(
         itemName: string;
         orderUnits: string | null;
         quantity: number;
+      
         pricePerUnit: number;
+        subtotal: number;
+        taxRate: number;
+        taxAmount: number;
         totalPrice: number;
+      
         rawIngredientId?: string;
         supplyItemId?: string;
+      
         previousQuantity: number;
         newQuantity: number;
       }[] = [];
@@ -1313,9 +1389,13 @@ app.patch(
           itemName,
           orderUnits: item.orderUnits,
           quantity: item.quantity,
+
           pricePerUnit: item.pricePerUnit,
+          subtotal: item.subtotal,
+          taxRate: item.taxRate,
+          taxAmount: item.taxAmount,
           totalPrice: item.totalPrice,
-        
+
           ...(rawIngredientId && {
             rawIngredientId,
           }),
@@ -1337,16 +1417,20 @@ app.patch(
           date: new Date(`${date}T12:00:00`),
           supplierId,
           subtotal,
-          taxRate: taxRateNum,
           taxAmount,
-          totalPrice: purchaseTotal,
+          totalPrice,
           items: {
             create: resolvedItems.map((item) => ({
               itemName: item.itemName,
               orderUnits: item.orderUnits,
               quantity: item.quantity,
+            
               pricePerUnit: item.pricePerUnit,
+              subtotal: item.subtotal,
+              taxRate: item.taxRate,
+              taxAmount: item.taxAmount,
               totalPrice: item.totalPrice,
+            
               rawIngredientId: item.rawIngredientId ?? null,
               supplyItemId: item.supplyItemId ?? null,
             })),
