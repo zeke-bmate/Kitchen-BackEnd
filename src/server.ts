@@ -319,13 +319,51 @@ app.post("/api/suppliers", verifyToken, requireRole("Admin", "Echo"), async (req
     res.status(201).json(supplier);
 });
 
-app.get(
-  "/api/purchases",
-  verifyToken,
-  requireRole("Admin", "Echo"),
-  async (req, res) => {
-    try {
-      const purchases = await prisma.purchase.findMany({
+app.get("/api/purchases", verifyToken, async (req, res) => {
+  try {
+    const page = Math.max(Number(req.query.page) || 1, 1);
+    const pageSize = Math.min(
+      Math.max(Number(req.query.pageSize) || 25, 1),
+      100
+    );
+
+    const supplierId =
+      typeof req.query.supplierId === "string"
+        ? req.query.supplierId
+        : undefined;
+
+    const startDate =
+      typeof req.query.startDate === "string"
+        ? req.query.startDate
+        : undefined;
+
+    const endDate =
+      typeof req.query.endDate === "string"
+        ? req.query.endDate
+        : undefined;
+
+    const skip = (page - 1) * pageSize;
+
+    const where = {
+      ...(supplierId && {
+        supplierId,
+      }),
+
+      ...((startDate || endDate) && {
+        date: {
+          ...(startDate && {
+            gte: new Date(`${startDate}T00:00:00`),
+          }),
+          ...(endDate && {
+            lte: new Date(`${endDate}T23:59:59.999`),
+          }),
+        },
+      }),
+    };
+
+    const [purchases, total, summary] = await prisma.$transaction([
+      prisma.purchase.findMany({
+        where,
         include: {
           supplier: true,
           items: {
@@ -335,21 +373,58 @@ app.get(
             },
           },
         },
-        orderBy: {
-          createdAt: "desc",
+        orderBy: [
+          {
+            date: "desc",
+          },
+          {
+            createdAt: "desc",
+          },
+        ],
+        skip,
+        take: pageSize,
+      }),
+
+      prisma.purchase.count({
+        where,
+      }),
+
+      prisma.purchase.aggregate({
+        where,
+        _count: {
+          _all: true,
         },
-      });
+        _sum: {
+          subtotal: true,
+          taxAmount: true,
+          totalPrice: true,
+        },
+      }),
+    ]);
 
-      return res.status(200).json(purchases);
-    } catch (error) {
-      console.error(error);
+    res.json({
+      purchases,
+      pagination: {
+        page,
+        pageSize,
+        total,
+        totalPages: Math.ceil(total / pageSize),
+      },
+      summary: {
+        purchaseCount: summary._count._all,
+        subtotal: summary._sum.subtotal ?? 0,
+        taxAmount: summary._sum.taxAmount ?? 0,
+        totalPrice: summary._sum.totalPrice ?? 0,
+      },
+    });
+  } catch (error) {
+    console.error("Failed to fetch purchases:", error);
 
-      return res.status(500).json({
-        error: "Failed to load purchases.",
-      });
-    }
-  },
-);
+    res.status(500).json({
+      error: "Failed to fetch purchases",
+    });
+  }
+});
 
 app.post(
   "/api/purchases",
