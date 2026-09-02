@@ -7,6 +7,7 @@ import jwt from "jsonwebtoken";
 import bcrypt from "bcryptjs";
 import { OrderStatus } from "@prisma/client";
 import { MeasurementUnit } from "@prisma/client";
+import { PERMISSIONS } from "./permissions.js";
 
 const app = express();
 
@@ -23,12 +24,14 @@ type JwtPayload = {
 //mockUser.passwordHash = bcrypt.hashSync("secure123", 10);
 
 // --- MIDDLEWARE: Protect Routes ---
-const verifyToken = (req, res, next) => {
-  const authHeader = req.headers['authorization'];
-  const token = authHeader && authHeader.split(' ')[1]; // Expects "Bearer <token>"
+const verifyToken = async (req, res, next) => {
+  const authHeader = req.headers["authorization"];
+  const token = authHeader && authHeader.split(" ")[1];
 
   if (!token) {
-    return res.status(401).json({ message: "Access denied. No token provided." });
+    return res.status(401).json({
+      message: "Access denied. No token provided.",
+    });
   }
 
   try {
@@ -36,24 +39,80 @@ const verifyToken = (req, res, next) => {
       token,
       process.env.JWT_SECRET!,
     ) as JwtPayload;
-    req.user = verified; // Adds user data (id) to the request object
-    next();
-  } catch (error) {
-    res.status(401).json({ message: "Invalid or expired token." });
-  }
-};
 
-const requireRole = (...allowedRoles: string[]) => {
-  return (req, res, next) => {
-    const userRole = req.user?.role;
+    const user = await prisma.user.findUnique({
+      where: {
+        id: verified.userId,
+      },
+      include: {
+        role: {
+          include: {
+            permissions: {
+              include: {
+                permission: true,
+              },
+            },
+          },
+        },
+        permissions: {
+          include: {
+            permission: true,
+          },
+        },
+      },
+    });
 
-    if (!userRole) {
-      return res.status(403).json({
-        message: "Access denied. User role not found.",
+    if (!user) {
+      return res.status(401).json({
+        message: "User no longer exists.",
       });
     }
 
-    if (!allowedRoles.includes(userRole)) {
+    const effectivePermissions = new Set<string>(
+      user.role.permissions.map(
+        (rolePermission) => rolePermission.permission.key
+      )
+    );
+
+    for (const userPermission of user.permissions) {
+      const permissionKey = userPermission.permission.key;
+    
+      if (userPermission.granted) {
+        effectivePermissions.add(permissionKey);
+      } else {
+        effectivePermissions.delete(permissionKey);
+      }
+    }
+
+    req.user = {
+      userId: user.id,
+      role: user.role.name,
+      permissions: Array.from(effectivePermissions),
+    };
+
+    next();
+  } catch (error) {
+    return res.status(401).json({
+      message: "Invalid or expired token.",
+    });
+  }
+};
+
+const requirePermission = (...requiredPermissions: string[]) => {
+  return (req, res, next) => {
+    const userPermissions = req.user?.permissions;
+
+    if (!userPermissions) {
+      return res.status(403).json({
+        message: "Access denied. User permissions not found.",
+      });
+    }
+
+    const hasAllPermissions = requiredPermissions.every(
+      (permission) => userPermissions.includes(permission),
+    );
+
+    if (!hasAllPermissions) {
       return res.status(403).json({
         message: "Access denied. Insufficient permissions.",
       });
@@ -104,7 +163,47 @@ app.post("/api/login", async (req, res) => {
   return res.json({ token });
 });
 
-app.get("/api/users", verifyToken, requireRole("Admin"), async (req, res) => {
+app.get("/api/me", verifyToken, async (req, res) => {
+  try {
+    const user = await prisma.user.findUnique({
+      where: {
+        id: req.user!.userId,
+      },
+      select: {
+        id: true,
+        name: true,
+        username: true,
+        role: {
+          select: {
+            name: true,
+          },
+        },
+      },
+    });
+
+    if (!user) {
+      return res.status(404).json({
+        error: "User not found.",
+      });
+    }
+
+    return res.json({
+      id: user.id,
+      name: user.name,
+      username: user.username,
+      role: user.role.name,
+      permissions: req.user!.permissions,
+    });
+  } catch (error) {
+    console.error(error);
+
+    return res.status(500).json({
+      error: "Failed to retrieve current user.",
+    });
+  }
+});
+
+app.get("/api/users", verifyToken, requirePermission(PERMISSIONS.USERS.VIEW), async (req, res) => {
     try {
         const users = await prisma.user.findMany({
             orderBy: { name: "asc" },
@@ -132,7 +231,7 @@ app.get("/api/users", verifyToken, requireRole("Admin"), async (req, res) => {
     }
 });
 
-app.post("/api/users", verifyToken, requireRole("Admin"), async (req, res) => {
+app.post("/api/users", verifyToken, requirePermission(PERMISSIONS.USERS.CREATE), async (req, res) => {
 
     try {
         const { username, password, name, roleId } = req.body;
@@ -206,7 +305,7 @@ app.post("/api/users", verifyToken, requireRole("Admin"), async (req, res) => {
     }
 }); 
 
-app.get("/api/roles", verifyToken, requireRole("Admin"),  async (req, res) => {
+app.get("/api/roles", verifyToken, requirePermission(PERMISSIONS.ROLES.VIEW),  async (req, res) => {
     try {
         const roles = await prisma.role.findMany({
             orderBy: { id: "asc"},
@@ -222,11 +321,378 @@ app.get("/api/roles", verifyToken, requireRole("Admin"),  async (req, res) => {
     }
 });
 
+app.get("/api/permissions", verifyToken, requirePermission(PERMISSIONS.PERMISSIONS.VIEW), async (req, res) => {
+    try {
+      const permissions = await prisma.permission.findMany({
+        orderBy: [
+          { module: "asc" },
+          { id: "asc" },
+        ],
+      });
+
+      return res.json(permissions);
+    } catch (error) {
+        console.error(error);
+
+        res.status(500).json({
+            error: "Failed to retrieve permissions",
+        });
+    }
+});
+
+app.get(
+  "/api/roles/:roleId/permissions",
+  verifyToken,
+  requirePermission(PERMISSIONS.PERMISSIONS.VIEW),
+  async (req, res) => {
+    try {
+      const roleId = Number(req.params.roleId);
+
+      if (!Number.isInteger(roleId)) {
+        return res.status(400).json({
+          error: "Invalid role ID.",
+        });
+      }
+
+      const role = await prisma.role.findUnique({
+        where: {
+          id: roleId,
+        },
+        include: {
+          permissions: {
+            include: {
+              permission: true,
+            },
+          },
+        },
+      });
+
+      if (!role) {
+        return res.status(404).json({
+          error: "Role not found.",
+        });
+      }
+
+      const permissions = role.permissions.map(
+        (rolePermission) => rolePermission.permission
+      );
+
+      return res.json({
+        id: role.id,
+        name: role.name,
+        permissions,
+      });
+    } catch (error) {
+      console.error(error);
+
+      return res.status(500).json({
+        error: "Failed to retrieve role permissions.",
+      });
+    }
+  }
+);
+
+app.put(
+  "/api/roles/:roleId/permissions",
+  verifyToken,
+  requirePermission(PERMISSIONS.PERMISSIONS.MANAGE),
+  async (req, res) => {
+    try {
+      const roleId = Number(req.params.roleId);
+      const permissionIds = req.body.permissionIds;
+
+      if (!Number.isInteger(roleId)) {
+        return res.status(400).json({
+          error: "Invalid role ID.",
+        });
+      }
+
+      if (
+        !Array.isArray(permissionIds) ||
+        !permissionIds.every((id) => Number.isInteger(id))
+      ) {
+        return res.status(400).json({
+          error: "permissionIds must be an array of integers.",
+        });
+      }
+
+      const role = await prisma.role.findUnique({
+        where: {
+          id: roleId,
+        },
+      });
+
+      if (!role) {
+        return res.status(404).json({
+          error: "Role not found.",
+        });
+      }
+
+      const uniquePermissionIds = [...new Set(permissionIds)];
+
+      const existingPermissions = await prisma.permission.findMany({
+        where: {
+          id: {
+            in: uniquePermissionIds,
+          },
+        },
+        select: {
+          id: true,
+        },
+      });
+
+      if (existingPermissions.length !== uniquePermissionIds.length) {
+        return res.status(400).json({
+          error: "One or more permission IDs are invalid.",
+        });
+      }
+
+      await prisma.$transaction(async (tx) => {
+        await tx.rolePermission.deleteMany({
+          where: {
+            roleId,
+          },
+        });
+
+        if (uniquePermissionIds.length > 0) {
+          await tx.rolePermission.createMany({
+            data: uniquePermissionIds.map((permissionId) => ({
+              roleId,
+              permissionId,
+            })),
+          });
+        }
+      });
+
+      return res.json({
+        message: "Role permissions updated successfully.",
+      });
+    } catch (error) {
+      console.error(error);
+
+      return res.status(500).json({
+        error: "Failed to update role permissions.",
+      });
+    }
+  }
+);
+
+app.get(
+  "/api/users/:userId/permissions",
+  verifyToken,
+  requirePermission(PERMISSIONS.PERMISSIONS.VIEW),
+  async (req, res) => {
+    try {
+      const userId = Number(req.params.userId);
+
+      if (!Number.isInteger(userId)) {
+        return res.status(400).json({
+          error: "Invalid user ID.",
+        });
+      }
+
+      const user = await prisma.user.findUnique({
+        where: {
+          id: userId,
+        },
+        include: {
+          role: {
+            include: {
+              permissions: true,
+            },
+          },
+          permissions: true,
+        },
+      });
+
+      if (!user) {
+        return res.status(404).json({
+          error: "User not found.",
+        });
+      }
+
+      const permissions = await prisma.permission.findMany({
+        orderBy: [
+          { module: "asc" },
+          { id: "asc" },
+        ],
+      });
+
+      const rolePermissionIds = new Set(
+        user.role.permissions.map(
+          (rolePermission) => rolePermission.permissionId
+        )
+      );
+
+      const userOverrides = new Map(
+        user.permissions.map((userPermission) => [
+          userPermission.permissionId,
+          userPermission.granted,
+        ])
+      );
+
+      const resolvedPermissions = permissions.map((permission) => {
+        const roleGranted = rolePermissionIds.has(permission.id);
+        const override = userOverrides.get(permission.id) ?? null;
+
+        const effective =
+          override !== null
+            ? override
+            : roleGranted;
+
+        return {
+          ...permission,
+          roleGranted,
+          override,
+          effective,
+        };
+      });
+
+      return res.json({
+        user: {
+          id: user.id,
+          name: user.name,
+          username: user.username,
+          role: {
+            id: user.role.id,
+            name: user.role.name,
+          },
+        },
+        permissions: resolvedPermissions,
+      });
+    } catch (error) {
+      console.error(error);
+
+      return res.status(500).json({
+        error: "Failed to retrieve user permissions.",
+      });
+    }
+  }
+);
+
+app.put(
+  "/api/users/:userId/permissions",
+  verifyToken,
+  requirePermission(PERMISSIONS.PERMISSIONS.MANAGE),
+  async (req, res) => {
+    try {
+      const userId = Number(req.params.userId);
+      const overrides = req.body.overrides;
+
+      if (!Number.isInteger(userId)) {
+        return res.status(400).json({
+          error: "Invalid user ID.",
+        });
+      }
+
+      if (!Array.isArray(overrides)) {
+        return res.status(400).json({
+          error: "overrides must be an array.",
+        });
+      }
+
+      const isValidOverride = overrides.every(
+        (override) =>
+          Number.isInteger(override.permissionId) &&
+          typeof override.granted === "boolean"
+      );
+
+      if (!isValidOverride) {
+        return res.status(400).json({
+          error:
+            "Each override must contain an integer permissionId and boolean granted value.",
+        });
+      }
+
+      const user = await prisma.user.findUnique({
+        where: {
+          id: userId,
+        },
+        include: {
+          role: true,
+        },
+      });
+
+      if (!user) {
+        return res.status(404).json({
+          error: "User not found.",
+        });
+      }
+
+      // Keep Admin simple and protected for now.
+      if (user.role.name === "Admin") {
+        return res.status(400).json({
+          error: "Admin user permissions cannot be overridden.",
+        });
+      }
+
+      const uniquePermissionIds = [
+        ...new Set(
+          overrides.map((override) => override.permissionId)
+        ),
+      ];
+
+      if (uniquePermissionIds.length !== overrides.length) {
+        return res.status(400).json({
+          error: "Duplicate permission IDs are not allowed.",
+        });
+      }
+
+      const existingPermissions = await prisma.permission.findMany({
+        where: {
+          id: {
+            in: uniquePermissionIds,
+          },
+        },
+        select: {
+          id: true,
+        },
+      });
+
+      if (
+        existingPermissions.length !== uniquePermissionIds.length
+      ) {
+        return res.status(400).json({
+          error: "One or more permission IDs are invalid.",
+        });
+      }
+
+      await prisma.$transaction(async (tx) => {
+        await tx.userPermission.deleteMany({
+          where: {
+            userId,
+          },
+        });
+
+        if (overrides.length > 0) {
+          await tx.userPermission.createMany({
+            data: overrides.map((override) => ({
+              userId,
+              permissionId: override.permissionId,
+              granted: override.granted,
+            })),
+          });
+        }
+      });
+
+      return res.json({
+        message: "User permission overrides updated successfully.",
+      });
+    } catch (error) {
+      console.error(error);
+
+      return res.status(500).json({
+        error: "Failed to update user permission overrides.",
+      });
+    }
+  }
+);
+
 app.get("/api/health", (req, res) => {
     res.json({ status: "ok" });
 });
 
-app.get("/api/suppliers", verifyToken, requireRole("Admin", "Echo"), async (req, res) => {
+app.get("/api/suppliers", verifyToken, requirePermission(PERMISSIONS.SUPPLIERS.VIEW), async (req, res) => {
     const suppliers = await prisma.supplier.findMany({
         orderBy: { createdAt: "desc"}
     });
@@ -236,7 +702,7 @@ app.get("/api/suppliers", verifyToken, requireRole("Admin", "Echo"), async (req,
 app.get(
   "/api/suppliers/:id/purchases",
   verifyToken,
-  requireRole("Admin", "Echo"),
+  requirePermission(PERMISSIONS.PURCHASES.VIEW),
   async (req, res) => {
     try {
       const supplierId = req.params.id;
@@ -291,7 +757,7 @@ app.get(
   },
 );
 
-app.post("/api/suppliers", verifyToken, requireRole("Admin", "Echo"), async (req, res) => {
+app.post("/api/suppliers", verifyToken, requirePermission(PERMISSIONS.SUPPLIERS.CREATE), async (req, res) => {
     const name = req.body.name;
     if (typeof name !== 'string') {
         res.status(422).send("Name of supplier is not of type string");
@@ -319,7 +785,11 @@ app.post("/api/suppliers", verifyToken, requireRole("Admin", "Echo"), async (req
     res.status(201).json(supplier);
 });
 
-app.get("/api/purchases", verifyToken, async (req, res) => {
+app.get(
+  "/api/purchases",
+  verifyToken,
+  requirePermission(PERMISSIONS.PURCHASES.VIEW),
+  async (req, res) => {
   try {
     const page = Math.max(Number(req.query.page) || 1, 1);
     const pageSize = Math.min(
@@ -429,7 +899,7 @@ app.get("/api/purchases", verifyToken, async (req, res) => {
 app.post(
   "/api/purchases",
   verifyToken,
-  requireRole("Admin", "Echo"),
+  requirePermission(PERMISSIONS.PURCHASES.CREATE),
   async (req, res) => {
     try {
       const items = req.body.items;
@@ -913,7 +1383,7 @@ app.post(
 app.patch(
   "/api/purchases/:id",
   verifyToken,
-  requireRole("Admin", "Echo"),
+  requirePermission(PERMISSIONS.PURCHASES.EDIT),
   async (req, res) => {
     try {
       const purchaseId = req.params.id;
@@ -1640,7 +2110,7 @@ app.patch(
   },
 );
 
-app.get("/api/raw-ingredients", verifyToken, requireRole("Admin", "Echo"), async (req, res) => {
+app.get("/api/raw-ingredients", verifyToken, requirePermission(PERMISSIONS.INVENTORY.VIEW), async (req, res) => {
     const ingredients = await prisma.rawIngredient.findMany({
         orderBy: { name: "asc"},
     });
@@ -1650,7 +2120,7 @@ app.get("/api/raw-ingredients", verifyToken, requireRole("Admin", "Echo"), async
 app.get(
   "/api/raw-ingredients/:id/transactions",
   verifyToken,
-  requireRole("Admin", "Echo"),
+  requirePermission(PERMISSIONS.INVENTORY.TRANSACTIONS_VIEW),
   async (req, res) => {
     try {
       const ingredientId = req.params.id;
@@ -1703,7 +2173,7 @@ app.get(
   },
 );
 
-app.post("/api/raw-ingredients", verifyToken, requireRole("Admin", "Echo"), async (req, res) => {
+app.post("/api/raw-ingredients", verifyToken, requirePermission(PERMISSIONS.INVENTORY.ADJUST), async (req, res) => {
     const name = req.body.name;
     const currentQuantity = req.body.currentQuantity;
     const canonicalUnit = req.body.canonicalUnit;
@@ -1755,7 +2225,7 @@ app.post("/api/raw-ingredients", verifyToken, requireRole("Admin", "Echo"), asyn
     return res.status(201).json(ingredient);
 });
 
-app.patch("/api/raw-ingredients/:id", verifyToken, requireRole("Admin", "Echo"), async (req,res) => {
+app.patch("/api/raw-ingredients/:id", verifyToken, requirePermission(PERMISSIONS.INVENTORY.ADJUST), async (req,res) => {
 
     try {
         const currentQuantity = req.body.currentQuantity;
@@ -1830,7 +2300,7 @@ app.patch("/api/raw-ingredients/:id", verifyToken, requireRole("Admin", "Echo"),
     }
 });
 
-app.get("/api/recipes", verifyToken, requireRole("Admin", "DeePlace", "Echo"), async (req, res) => {
+app.get("/api/recipes", verifyToken, requirePermission(PERMISSIONS.RECIPES.VIEW), async (req, res) => {
     const recipes = await prisma.recipe.findMany({
         include: { 
             ingredients: { 
@@ -1842,7 +2312,7 @@ app.get("/api/recipes", verifyToken, requireRole("Admin", "DeePlace", "Echo"), a
     res.json(recipes);
 });
 
-app.post("/api/recipes", verifyToken, requireRole("Admin", "Echo"), async (req, res) => {
+app.post("/api/recipes", verifyToken, requirePermission(PERMISSIONS.RECIPES.CREATE), async (req, res) => {
     const name = req.body.name;
 
     if (!isNonEmptyString(name)) {
@@ -1949,7 +2419,7 @@ app.post("/api/recipes", verifyToken, requireRole("Admin", "Echo"), async (req, 
     res.status(201).json(recipe);
 });
 
-app.get("/api/production-batches", verifyToken, requireRole("Admin", "Echo"), async (req, res) => {
+app.get("/api/production-batches", verifyToken, requirePermission(PERMISSIONS.PRODUCTION.VIEW), async (req, res) => {
     const productionBatches = await prisma.productionBatch.findMany({
         include : { 
             order : {
@@ -1972,7 +2442,7 @@ app.get("/api/production-batches", verifyToken, requireRole("Admin", "Echo"), as
     res.json(productionBatches);
 });
 
-app.post("/api/production-batches", verifyToken, requireRole("Admin", "Echo"), async (req, res) => {
+app.post("/api/production-batches", verifyToken, requirePermission(PERMISSIONS.PRODUCTION.CREATE), async (req, res) => {
     const recipeId = req.body.recipeId;
     const orderId = req.body.orderId;
 
@@ -2116,7 +2586,7 @@ app.post("/api/production-batches", verifyToken, requireRole("Admin", "Echo"), a
     res.status(201).json(result);
 });
 
-app.get("/api/finished-inventory", verifyToken, requireRole("Admin", "DeePlace", "Echo"), async (req, res) => {
+app.get("/api/finished-inventory", verifyToken, requirePermission(PERMISSIONS.FINISHED_INVENTORY.VIEW), async (req, res) => {
     const finishedInventory = await prisma.finishedInventory.findMany({
         include : { recipe: true },
         orderBy: { 
@@ -2128,7 +2598,7 @@ app.get("/api/finished-inventory", verifyToken, requireRole("Admin", "DeePlace",
     res.json(finishedInventory);
 });
 
-app.post("/api/sales", requireRole("Admin", "DeePlace"), verifyToken, async (req, res) => {
+app.post("/api/sales", verifyToken, requirePermission(PERMISSIONS.SALES.CREATE), async (req, res) => {
     const recipeId = req.body.recipeId;
 
     if (!isNonEmptyString(recipeId)) {
@@ -2188,7 +2658,7 @@ app.post("/api/sales", requireRole("Admin", "DeePlace"), verifyToken, async (req
     res.status(201).json(result);
 });
 
-app.get("/api/sales", requireRole("Admin", "DeePlace"), verifyToken, async (req, res) => {
+app.get("/api/sales", verifyToken, requirePermission(PERMISSIONS.SALES.VIEW), async (req, res) => {
     const sales = await prisma.sale.findMany({
         include : { recipe: true },
         orderBy : { createdAt: "desc"}
@@ -2199,7 +2669,7 @@ app.get("/api/sales", requireRole("Admin", "DeePlace"), verifyToken, async (req,
 app.get(
   "/api/recipes/:id/cost",
   verifyToken,
-  requireRole("Admin", "DeePlace", "Echo"),
+  requirePermission(PERMISSIONS.RECIPES.VIEW_COST),
   async (req, res) => {
     try {
       const recipeId = req.params.id;
@@ -2323,7 +2793,7 @@ app.get(
   },     
 );
 
-app.post("/api/sales-import/preview", verifyToken, requireRole("Admin", "DeePlace"), upload.single("file"), async (req, res) => {
+app.post("/api/sales-import/preview", verifyToken, requirePermission(PERMISSIONS.SALES.IMPORT), upload.single("file"), async (req, res) => {
     if (!req.file) {
         res.status(422).json({
             error: "CSV file is required"
@@ -2371,7 +2841,7 @@ app.post("/api/sales-import/preview", verifyToken, requireRole("Admin", "DeePlac
     res.json(preview);
 });
 
-app.post("/api/sales-import/mappings", verifyToken, requireRole("Admin", "DeePlace"), async (req, res) => {
+app.post("/api/sales-import/mappings", verifyToken, requirePermission(PERMISSIONS.SALES.MAPPING_MANAGE), async (req, res) => {
     const posProductName = req.body.posProductName;
     const recipeId = req.body.recipeId;
 
@@ -2407,7 +2877,7 @@ app.post("/api/sales-import/mappings", verifyToken, requireRole("Admin", "DeePla
     res.status(201).json(mapping);
 });
 
-app.post("/api/sales-import/confirm", verifyToken, requireRole("Admin", "DeePlace"), async (req, res) => {
+app.post("/api/sales-import/confirm", verifyToken, requirePermission(PERMISSIONS.SALES.IMPORT), async (req, res) => {
     const imports = req.body;
 
     if (!Array.isArray(imports)) {
@@ -2532,7 +3002,7 @@ app.post("/api/sales-import/confirm", verifyToken, requireRole("Admin", "DeePlac
     res.status(201).json(summary);
 });
 
-app.get("/api/dashboard", verifyToken, requireRole("Admin", "DeePlace", "Echo"), async (req, res) => {
+app.get("/api/dashboard", verifyToken, requirePermission(PERMISSIONS.DASHBOARD.VIEW), async (req, res) => {
     const availableServings = await prisma.finishedInventory.aggregate({
         _sum: { quantityAvailable: true }
     });
@@ -2602,7 +3072,7 @@ app.get("/api/dashboard", verifyToken, requireRole("Admin", "DeePlace", "Echo"),
     });
 });
 
-app.get("/api/orders", verifyToken, requireRole("Admin", "DeePlace", "Echo"), async (req,res) => {
+app.get("/api/orders", verifyToken, requirePermission(PERMISSIONS.ORDERS.VIEW), async (req,res) => {
     try {
         const orders = await prisma.order.findMany({
         orderBy: { createdAt: "desc"},
@@ -2620,7 +3090,7 @@ app.get("/api/orders", verifyToken, requireRole("Admin", "DeePlace", "Echo"), as
     }
 });
 
-app.get("/api/orders/:id", verifyToken, async (req,res) => {
+app.get("/api/orders/:id", verifyToken, requirePermission(PERMISSIONS.ORDERS.VIEW), async (req,res) => {
     try {
         const { id: orderId } = req.params;
 
@@ -2658,7 +3128,7 @@ app.get("/api/orders/:id", verifyToken, async (req,res) => {
     }
 });
 
-app.post("/api/orders", verifyToken, requireRole("Admin", "DeePlace", "Echo"), async (req, res) => {
+app.post("/api/orders", verifyToken, requirePermission(PERMISSIONS.ORDERS.CREATE), async (req, res) => {
     const { recipeId, quantity, location } = req.body;
 
     const validOrderLocations = [
@@ -2734,7 +3204,7 @@ const nextStatus: Partial<Record<OrderStatus, OrderStatus>> = {
         [OrderStatus.DELIVERY]: OrderStatus.FINISHED,
     };
 
-app.patch("/api/orders/:id/status", verifyToken, requireRole("Admin", "DeePlace", "Echo"), async (req,res) => {
+app.patch("/api/orders/:id/status", verifyToken, requirePermission(PERMISSIONS.ORDERS.UPDATE_STATUS), async (req,res) => {
 
     const { id: orderId } = req.params;
     const status = req.body.status;
@@ -2814,7 +3284,7 @@ app.patch("/api/orders/:id/status", verifyToken, requireRole("Admin", "DeePlace"
 app.get(
   "/api/inventory-transfers",
   verifyToken,
-  requireRole("Admin", "Echo"),
+  requirePermission(PERMISSIONS.INVENTORY_TRANSFER.VIEW),
   async (req, res) => {
     try {
       const transfers = await prisma.inventoryTransfer.findMany({
@@ -2844,7 +3314,7 @@ app.get(
 app.post(
   "/api/inventory-transfers",
   verifyToken,
-  requireRole("Admin", "Echo"),
+  requirePermission(PERMISSIONS.INVENTORY_TRANSFER.CREATE),
   async (req, res) => {
     try {
       const {
@@ -3033,7 +3503,7 @@ app.post(
   }
 );
 
-app.get("/api/supply-items", verifyToken, requireRole("Admin", "Echo"), async (req, res) => {
+app.get("/api/supply-items", verifyToken, requirePermission(PERMISSIONS.INVENTORY.VIEW), async (req, res) => {
     try {
         const supplies = await prisma.supplyItem.findMany({
             orderBy: { createdAt: "desc"}
@@ -3052,7 +3522,7 @@ app.get("/api/supply-items", verifyToken, requireRole("Admin", "Echo"), async (r
 app.post(
   "/api/supply-items",
   verifyToken,
-  requireRole("Admin", "Echo"),
+  requirePermission(PERMISSIONS.INVENTORY.ADJUST),
   async (req, res) => {
     try {
       const name = req.body.name;

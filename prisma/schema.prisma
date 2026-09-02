@@ -14,37 +14,37 @@ model Supplier {
 }
 
 model Purchase {
-  id         String         @id @default(cuid())
+  id         String   @id @default(cuid())
   date       DateTime
-  subtotal   Float          @default(0)
-  taxAmount  Float          @default(0)
+  subtotal   Float    @default(0)
+  taxAmount  Float    @default(0)
   totalPrice Float
   supplierId String
-  createdAt  DateTime       @default(now())
+  createdAt  DateTime @default(now())
 
-  supplier   Supplier       @relation(fields: [supplierId], references: [id])
-  items      PurchaseItem[]
+  supplier              Supplier               @relation(fields: [supplierId], references: [id])
+  items                 PurchaseItem[]
   inventoryTransactions InventoryTransaction[]
 }
 
 model PurchaseItem {
-  id              String   @id @default(cuid())
-  purchaseId      String
-  itemName        String
-  orderUnits      String?
-  quantity        Float
-  pricePerUnit    Float
-  subtotal        Float
-  taxRate         Float    @default(0)
-  taxAmount       Float    @default(0)
-  totalPrice      Float
+  id           String  @id @default(cuid())
+  purchaseId   String
+  itemName     String
+  orderUnits   String?
+  quantity     Float
+  pricePerUnit Float
+  subtotal     Float
+  taxRate      Float   @default(0)
+  taxAmount    Float   @default(0)
+  totalPrice   Float
 
   rawIngredientId String?
   supplyItemId    String?
 
-  purchase        Purchase       @relation(fields: [purchaseId], references: [id])
-  rawIngredient   RawIngredient? @relation(fields: [rawIngredientId], references: [id])
-  supplyItem      SupplyItem?    @relation(fields: [supplyItemId], references: [id])
+  purchase      Purchase       @relation(fields: [purchaseId], references: [id])
+  rawIngredient RawIngredient? @relation(fields: [rawIngredientId], references: [id])
+  supplyItem    SupplyItem?    @relation(fields: [supplyItemId], references: [id])
 }
 
 enum MeasurementUnit {
@@ -61,11 +61,11 @@ enum MeasurementUnit {
 }
 
 model RawIngredient {
-  id                    String                 @id @default(cuid())
-  name                  String                 @unique
+  id                    String                  @id @default(cuid())
+  name                  String                  @unique
   currentQuantity       Float
-  canonicalUnit         MeasurementUnit        @default(KG)
-  createdAt             DateTime               @default(now())
+  canonicalUnit         MeasurementUnit         @default(KG)
+  createdAt             DateTime                @default(now())
   recipeIngredients     RecipeIngredient[]
   purchaseItems         PurchaseItem[]
   inventoryAdjustments  InventoryAdjustment[]
@@ -88,24 +88,24 @@ model Recipe {
 }
 
 model RecipeIngredient {
-    id              String        @id @default(cuid())
-    recipeId        String
-    rawIngredientId String
-    quantity        Float
-    rawIngredient   RawIngredient @relation(fields: [rawIngredientId], references: [id])
-    recipe          Recipe        @relation(fields: [recipeId], references: [id])
-  
-    @@unique([recipeId, rawIngredientId])
+  id              String        @id @default(cuid())
+  recipeId        String
+  rawIngredientId String
+  quantity        Float
+  rawIngredient   RawIngredient @relation(fields: [rawIngredientId], references: [id])
+  recipe          Recipe        @relation(fields: [recipeId], references: [id])
+
+  @@unique([recipeId, rawIngredientId])
 }
 
 model ProductionBatch {
-  id               String   @id @default(cuid())
-  recipeId         String
-  quantityProduced Float
-  createdAt        DateTime @default(now())
-  recipe           Recipe   @relation(fields: [recipeId], references: [id])
-  orderId          String?
-  order            Order? @relation(fields: [orderId], references: [id])
+  id                    String                 @id @default(cuid())
+  recipeId              String
+  quantityProduced      Float
+  createdAt             DateTime               @default(now())
+  recipe                Recipe                 @relation(fields: [recipeId], references: [id])
+  orderId               String?
+  order                 Order?                 @relation(fields: [orderId], references: [id])
   inventoryTransactions InventoryTransaction[]
 }
 
@@ -143,14 +143,15 @@ model SalesImport {
 }
 
 model User {
-  id        Int      @id @default(autoincrement())
-  username  String   @unique
-  passwordHash  String
-  name      String
-  roleId      Int
-  createdAt DateTime @default(now())
+  id           Int      @id @default(autoincrement())
+  username     String   @unique
+  passwordHash String
+  name         String
+  roleId       Int
+  createdAt    DateTime @default(now())
 
-  role Role @relation(fields: [roleId], references: [id])
+  role        Role             @relation(fields: [roleId], references: [id])
+  permissions UserPermission[]
 }
 
 model Role {
@@ -158,7 +159,39 @@ model Role {
   name      String   @unique
   createdAt DateTime @default(now())
 
-  users User[]
+  users       User[]
+  permissions RolePermission[]
+}
+
+model Permission {
+  id          Int     @id @default(autoincrement())
+  key         String  @unique
+  description String?
+  module      String
+
+  rolePermissions RolePermission[]
+  userPermissions UserPermission[]
+}
+
+model RolePermission {
+  roleId       Int
+  permissionId Int
+
+  role       Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+}
+
+model UserPermission {
+  userId       Int
+  permissionId Int
+  granted      Boolean
+
+  user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([userId, permissionId])
 }
 
 enum OrderStatus {
@@ -170,37 +203,36 @@ enum OrderStatus {
 }
 
 model Order {
-  id        String      @id @default(cuid())
-  product   String?
-  quantity  Int
-  status    OrderStatus @default(CREATED)
-  createdAt DateTime    @default(now())
-  updatedAt DateTime    @updatedAt
-  statusLogs OrderStatusLog[]
-  recipeId  String?
-  recipe    Recipe? @relation(fields: [recipeId], references: [id])
+  id                String            @id @default(cuid())
+  product           String?
+  quantity          Int
+  status            OrderStatus       @default(CREATED)
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+  statusLogs        OrderStatusLog[]
+  recipeId          String?
+  recipe            Recipe?           @relation(fields: [recipeId], references: [id])
   productionBatches ProductionBatch[]
-  location   Location?
+  location          Location?
 }
 
 model OrderStatusLog {
-  id        String      @id @default(cuid())
-  orderId   String
-  previousStatus  OrderStatus?
-  newStatus       OrderStatus
-  createdAt       DateTime    @default(now())
+  id             String       @id @default(cuid())
+  orderId        String
+  previousStatus OrderStatus?
+  newStatus      OrderStatus
+  createdAt      DateTime     @default(now())
 
   order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
 }
 
-
 model InventoryAdjustment {
-  id                String   @id @default(cuid())
-  rawIngredientId   String
-  previousQuantity  Float
-  newQuantity       Float
-  reason            String?
-  createdAt         DateTime @default(now())
+  id               String   @id @default(cuid())
+  rawIngredientId  String
+  previousQuantity Float
+  newQuantity      Float
+  reason           String?
+  createdAt        DateTime @default(now())
 
   rawIngredient RawIngredient @relation(fields: [rawIngredientId], references: [id], onDelete: Cascade)
 }
@@ -214,29 +246,29 @@ enum InventoryTransactionType {
 }
 
 model InventoryTransaction {
-  id                  String                   @id @default(cuid())
+  id String @id @default(cuid())
 
-  rawIngredientId     String?
-  supplyItemId         String?
+  rawIngredientId String?
+  supplyItemId    String?
 
-  type                InventoryTransactionType
-  quantityChange      Float
-  previousQuantity    Float
-  newQuantity         Float
-  reason              String?
+  type             InventoryTransactionType
+  quantityChange   Float
+  previousQuantity Float
+  newQuantity      Float
+  reason           String?
 
   purchaseId          String?
   productionBatchId   String?
   inventoryTransferId String?
 
-  createdAt           DateTime                 @default(now())
+  createdAt DateTime @default(now())
 
-  rawIngredient       RawIngredient?           @relation(fields: [rawIngredientId], references: [id])
-  supplyItem           SupplyItem?              @relation(fields: [supplyItemId], references: [id])
+  rawIngredient RawIngredient? @relation(fields: [rawIngredientId], references: [id])
+  supplyItem    SupplyItem?    @relation(fields: [supplyItemId], references: [id])
 
-  purchase             Purchase?                @relation(fields: [purchaseId], references: [id])
-  productionBatch      ProductionBatch?         @relation(fields: [productionBatchId], references: [id])
-  inventoryTransfer    InventoryTransfer?       @relation(fields: [inventoryTransferId], references: [id])
+  purchase          Purchase?          @relation(fields: [purchaseId], references: [id])
+  productionBatch   ProductionBatch?   @relation(fields: [productionBatchId], references: [id])
+  inventoryTransfer InventoryTransfer? @relation(fields: [inventoryTransferId], references: [id])
 }
 
 enum Location {
@@ -247,30 +279,30 @@ enum Location {
 }
 
 model InventoryTransfer {
-  id                  String                  @id @default(cuid())
-  sourceLocation      Location
-  destinationLocation Location
-  createdAt           DateTime                @default(now())
-  items               InventoryTransferItem[]
+  id                    String                  @id @default(cuid())
+  sourceLocation        Location
+  destinationLocation   Location
+  createdAt             DateTime                @default(now())
+  items                 InventoryTransferItem[]
   inventoryTransactions InventoryTransaction[]
 }
 
 model InventoryTransferItem {
-  id              String            @id @default(cuid())
+  id              String @id @default(cuid())
   transferId      String
   rawIngredientId String
   quantity        Float
 
-  transfer        InventoryTransfer @relation(fields: [transferId], references: [id], onDelete: Cascade)
-  rawIngredient   RawIngredient     @relation(fields: [rawIngredientId], references: [id])
+  transfer      InventoryTransfer @relation(fields: [transferId], references: [id], onDelete: Cascade)
+  rawIngredient RawIngredient     @relation(fields: [rawIngredientId], references: [id])
 }
 
 model SupplyItem {
-  id                    String                 @id @default(cuid())
-  name                  String                 @unique
-  currentQuantity       Float
-  canonicalUnit         MeasurementUnit
-  createdAt             DateTime               @default(now())
+  id              String          @id @default(cuid())
+  name            String          @unique
+  currentQuantity Float
+  canonicalUnit   MeasurementUnit
+  createdAt       DateTime        @default(now())
 
   purchaseItems         PurchaseItem[]
   inventoryTransactions InventoryTransaction[]

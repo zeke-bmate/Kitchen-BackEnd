@@ -4,6 +4,7 @@ declare global {
       user?: {
         userId: number;
         role: string;
+        permissions: string[];
       };
     }
   }
