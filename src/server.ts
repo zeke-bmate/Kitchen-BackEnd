@@ -872,20 +872,56 @@ app.get(
       }),
     ]);
 
+    const canViewCost =
+      req.user?.permissions.includes(PERMISSIONS.PURCHASES.VIEW_COST) ?? false;
+      
+    const purchasesResponse = purchases.map((purchase) => {
+      if (canViewCost) {
+        return purchase;
+      }
+    
+      const {
+        subtotal,
+        taxAmount,
+        totalPrice,
+        ...purchaseWithoutCost
+      } = purchase;
+    
+      return {
+        ...purchaseWithoutCost,
+        items: purchase.items.map((item) => {
+          const {
+            pricePerUnit,
+            subtotal,
+            taxRate,
+            taxAmount,
+            totalPrice,
+            ...itemWithoutCost
+          } = item;
+        
+          return itemWithoutCost;
+        }),
+      };
+    });
+    
     res.json({
-      purchases,
+      purchases: purchasesResponse,
       pagination: {
         page,
         pageSize,
         total,
         totalPages: Math.ceil(total / pageSize),
       },
-      summary: {
-        purchaseCount: summary._count._all,
-        subtotal: summary._sum.subtotal ?? 0,
-        taxAmount: summary._sum.taxAmount ?? 0,
-        totalPrice: summary._sum.totalPrice ?? 0,
-      },
+      summary: canViewCost
+        ? {
+            purchaseCount: summary._count._all,
+            subtotal: summary._sum.subtotal ?? 0,
+            taxAmount: summary._sum.taxAmount ?? 0,
+            totalPrice: summary._sum.totalPrice ?? 0,
+          }
+        : {
+            purchaseCount: summary._count._all,
+          },
     });
   } catch (error) {
     console.error("Failed to fetch purchases:", error);
